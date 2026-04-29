@@ -1,0 +1,12 @@
+# PyInstaller 中繼產物
+build/
+__pycache__/
+*.pyc
+*.spec.bak
+
+# 注意：本專案 EXE 與 Excel 都輸出到 D:\Backup\Desktop\CODE\number
+# 舊版自動搬到 number\old\ — 不在這個 repo 內，與 dist 完全脫鉤
+
+# 工作快照
+debug/
+log/
