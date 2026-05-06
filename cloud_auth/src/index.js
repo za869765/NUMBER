@@ -41,6 +41,9 @@ export default {
       if (path === '/admin/audit/clear' && request.method === 'POST') {
         return await handleAdminAuditClear(request, env);
       }
+      if (path === '/admin/audit/daily' && request.method === 'POST') {
+        return await handleAdminDaily(request, env);
+      }
       if (path === '/' || path === '/health') {
         return new Response('hiv-auth ok', { status: 200 });
       }
@@ -253,6 +256,31 @@ async function handleAdminStats(request, env) {
   });
 }
 
+// ── 管理員：每日統計（長條圖用）──────────────
+async function handleAdminDaily(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await checkAdmin(body.admin_pwd, env))) {
+    return jsonReply({ ok: false, reason: '管理員密碼錯誤' }, 401);
+  }
+  const days = Math.min(60, Math.max(7, parseInt(body.days, 10) || 14));
+  const r = await env.DB.prepare(
+    `SELECT DATE(ts) AS day,
+            COUNT(*) AS total,
+            SUM(CASE WHEN ok=1 THEN 1 ELSE 0 END) AS ok_cnt,
+            SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END) AS fail_cnt,
+            COUNT(DISTINCT ip) AS uniq_ip,
+            MIN(ts) AS first_ts,
+            MAX(ts) AS last_ts
+     FROM audit
+     WHERE ts >= datetime('now', ?1)
+     GROUP BY DATE(ts)
+     ORDER BY day`
+  )
+    .bind(`-${days} days`)
+    .all();
+  return jsonReply({ ok: true, days, rows: r.results || [] });
+}
+
 // ── 管理員：清空 audit ───────────────────────
 async function handleAdminAuditClear(request, env) {
   const body = await request.json().catch(() => ({}));
@@ -424,38 +452,35 @@ const ADMIN_HTML = `<!doctype html>
     </div>
 
     <div class="card">
-      <h2>📊 使用統計</h2>
-      <div class="row" style="margin-bottom:10px">
-        <h3 style="margin:0;font-size:13px;color:#546e7a">最近 24 小時</h3>
+      <h2>📊 每日使用量</h2>
+      <div class="row" style="gap:6px;margin-bottom:8px">
+        <select id="chart_days" onchange="loadDaily()">
+          <option value="7">最近 7 天</option>
+          <option value="14" selected>最近 14 天</option>
+          <option value="30">最近 30 天</option>
+          <option value="60">最近 60 天</option>
+        </select>
+        <button class="ghost" onclick="loadDaily()">重新整理</button>
+        <span style="margin-left:auto;color:#546e7a;font-size:12px">數字 = 不同 IP 數（≈使用人數）</span>
       </div>
-      <div class="stat-grid" id="stat_24h">
-        <div class="stat-box"><div class="label">總請求</div><div class="num" id="t24_total">—</div></div>
-        <div class="stat-box"><div class="label">不同 IP</div><div class="num" id="t24_ip">—</div></div>
-        <div class="stat-box"><div class="label">成功</div><div class="num ok" id="t24_ok">—</div></div>
-        <div class="stat-box"><div class="label">失敗</div><div class="num bad" id="t24_fail">—</div></div>
+      <div id="chart"></div>
+      <div class="row" style="margin-top:6px;font-size:12px;color:#546e7a;gap:14px">
+        <span><span style="display:inline-block;width:12px;height:12px;background:#43a047;vertical-align:middle"></span> 成功</span>
+        <span><span style="display:inline-block;width:12px;height:12px;background:#e53935;vertical-align:middle"></span> 失敗</span>
+        <span style="margin-left:auto" id="chart_total">—</span>
       </div>
-      <div class="row" style="margin:14px 0 10px">
-        <h3 style="margin:0;font-size:13px;color:#546e7a">最近 7 天</h3>
-      </div>
-      <div class="stat-grid" id="stat_7d">
-        <div class="stat-box"><div class="label">總請求</div><div class="num" id="t7_total">—</div></div>
-        <div class="stat-box"><div class="label">不同 IP</div><div class="num" id="t7_ip">—</div></div>
-        <div class="stat-box"><div class="label">成功</div><div class="num ok" id="t7_ok">—</div></div>
-        <div class="stat-box"><div class="label">失敗</div><div class="num bad" id="t7_fail">—</div></div>
-      </div>
-      <h3 style="margin:14px 0 6px;font-size:13px;color:#546e7a">📌 活躍 IP（過去 7 天 Top 10）</h3>
+      <h3 style="margin:18px 0 6px;font-size:13px;color:#546e7a">📌 活躍 IP（過去 7 天 Top 10）</h3>
       <div class="scroll" style="max-height:200px">
         <table id="top_ip_table">
           <thead><tr><th>IP</th><th>國</th><th>總</th><th>成</th><th>敗</th><th>最後</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
-      <button class="ghost" onclick="loadStats()" style="margin-top:10px">重新整理統計</button>
     </div>
 
     <div class="card">
       <h2>📋 活動紀錄</h2>
-      <div class="row" style="gap:6px">
+      <div class="row" style="gap:6px;align-items:center;flex-wrap:wrap">
         <select id="audit_filter" onchange="loadAudit()">
           <option value="all">全部</option>
           <option value="ok">僅成功</option>
@@ -469,7 +494,12 @@ const ADMIN_HTML = `<!doctype html>
           <option value="500">最近 500 筆</option>
         </select>
         <button class="ghost" onclick="loadAudit()">重新整理</button>
-        <button class="danger" onclick="clearAudit()">清空舊紀錄</button>
+        <span style="display:inline-flex;align-items:center;gap:4px;margin-left:auto">
+          <span style="color:#546e7a;font-size:12px">清掉</span>
+          <input id="audit_clear_days" type="number" value="30" min="0" max="365" style="width:60px;padding:4px 6px">
+          <span style="color:#546e7a;font-size:12px">天前（0=全清）</span>
+          <button class="danger" onclick="clearAudit()">清</button>
+        </span>
       </div>
       <div class="scroll" style="margin-top:10px">
         <table id="audit_table">
@@ -511,7 +541,7 @@ async function login(){
   document.getElementById('login_card').classList.add('hidden');
   document.getElementById('main_card').classList.remove('hidden');
   renderState(r.state);
-  loadStats();
+  loadDaily();
   loadAudit();
 }
 function fmt(ts){
@@ -526,30 +556,76 @@ function fmt(ts){
     return d.toLocaleString('zh-TW',{hour12:false});
   }catch{return ts;}
 }
-async function loadStats(){
-  const r = await api('/admin/audit/stats', {admin_pwd: ADM});
-  if (!r.ok) return toast(r.reason || '失敗', true);
-  const a = r.last_24h || {}, b = r.last_7d || {};
-  t24_total.textContent = a.total || 0;
-  t24_ip.textContent = a.uniq_ip || 0;
-  t24_ok.textContent = a.ok_cnt || 0;
-  t24_fail.textContent = a.fail_cnt || 0;
-  t7_total.textContent = b.total || 0;
-  t7_ip.textContent = b.uniq_ip || 0;
-  t7_ok.textContent = b.ok_cnt || 0;
-  t7_fail.textContent = b.fail_cnt || 0;
-  const tb = document.querySelector('#top_ip_table tbody');
-  tb.innerHTML = '';
-  for (const row of (r.top_ips || [])){
-    const tr = document.createElement('tr');
-    tr.innerHTML = '<td class="ip">'+(row.ip||'—')+'</td>'+
-                   '<td>'+(row.country||'')+'</td>'+
-                   '<td>'+(row.total||0)+'</td>'+
-                   '<td style="color:#1b5e20">'+(row.ok_cnt||0)+'</td>'+
-                   '<td style="color:#c62828">'+(row.fail_cnt||0)+'</td>'+
-                   '<td class="ts">'+fmt(row.last_seen)+'</td>';
-    tb.appendChild(tr);
+async function loadDaily(){
+  const days = parseInt(document.getElementById('chart_days').value, 10);
+  const [d, s] = await Promise.all([
+    api('/admin/audit/daily', {admin_pwd: ADM, days}),
+    api('/admin/audit/stats', {admin_pwd: ADM}),
+  ]);
+  if (!d.ok) return toast(d.reason || '失敗', true);
+  renderChart(d.rows, days);
+  // 順帶更新 Top IP 表（從 stats 端點）
+  if (s.ok) {
+    const tb = document.querySelector('#top_ip_table tbody');
+    tb.innerHTML = '';
+    for (const row of (s.top_ips || [])){
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td class="ip">'+(row.ip||'—')+'</td>'+
+                     '<td>'+(row.country||'')+'</td>'+
+                     '<td>'+(row.total||0)+'</td>'+
+                     '<td style="color:#1b5e20">'+(row.ok_cnt||0)+'</td>'+
+                     '<td style="color:#c62828">'+(row.fail_cnt||0)+'</td>'+
+                     '<td class="ts">'+fmt(row.last_seen)+'</td>';
+      tb.appendChild(tr);
+    }
   }
+}
+
+function renderChart(rows, days){
+  const today = new Date();
+  const map = new Map((rows || []).map(r => [r.day, r]));
+  const series = [];
+  for (let i = days - 1; i >= 0; i--){
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    const r = map.get(key) || {day:key, total:0, ok_cnt:0, fail_cnt:0, uniq_ip:0};
+    series.push(r);
+  }
+  const W = 760, H = 220, PAD_L = 36, PAD_R = 8, PAD_T = 18, PAD_B = 38;
+  const innerW = W - PAD_L - PAD_R, innerH = H - PAD_T - PAD_B;
+  const maxTotal = Math.max(1, ...series.map(s => s.total || 0));
+  const slot = innerW / series.length;
+  const barW = Math.max(6, slot * 0.7);
+  let svg = '<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto;background:#fafafa;border-radius:4px">';
+  for (let i = 0; i <= 4; i++){
+    const y = PAD_T + innerH - (innerH * i / 4);
+    const v = Math.round(maxTotal * i / 4);
+    svg += '<line x1="'+PAD_L+'" y1="'+y+'" x2="'+(W-PAD_R)+'" y2="'+y+'" stroke="#eee" />';
+    svg += '<text x="'+(PAD_L-4)+'" y="'+(y+3.5)+'" text-anchor="end" font-size="10" fill="#888">'+v+'</text>';
+  }
+  let totalAll = 0, totalOk = 0, totalFail = 0;
+  series.forEach((s, i) => {
+    totalAll += s.total||0; totalOk += s.ok_cnt||0; totalFail += s.fail_cnt||0;
+    const x = PAD_L + slot * i + (slot - barW) / 2;
+    const okH = (s.ok_cnt || 0) / maxTotal * innerH;
+    const failH = (s.fail_cnt || 0) / maxTotal * innerH;
+    const totalH = okH + failH;
+    const yTop = PAD_T + innerH - totalH;
+    const tip = s.day + '\\n成功 ' + (s.ok_cnt||0) + '\\n失敗 ' + (s.fail_cnt||0) + '\\n不同 IP ' + (s.uniq_ip||0);
+    if (okH > 0)
+      svg += '<rect x="'+x+'" y="'+(PAD_T+innerH-okH)+'" width="'+barW+'" height="'+okH+'" fill="#43a047"><title>'+tip+'</title></rect>';
+    if (failH > 0)
+      svg += '<rect x="'+x+'" y="'+(PAD_T+innerH-okH-failH)+'" width="'+barW+'" height="'+failH+'" fill="#e53935"><title>'+tip+'</title></rect>';
+    if ((s.uniq_ip||0) > 0)
+      svg += '<text x="'+(x+barW/2)+'" y="'+(yTop-4)+'" text-anchor="middle" font-size="10" fill="#0d47a1" font-weight="600">'+s.uniq_ip+'</text>';
+    const lbl = s.day.slice(5);
+    svg += '<text x="'+(x+barW/2)+'" y="'+(H-PAD_B+14)+'" text-anchor="middle" font-size="9" fill="#666">'+lbl+'</text>';
+  });
+  svg += '<line x1="'+PAD_L+'" y1="'+(PAD_T+innerH)+'" x2="'+(W-PAD_R)+'" y2="'+(PAD_T+innerH)+'" stroke="#aaa" />';
+  svg += '</svg>';
+  document.getElementById('chart').innerHTML = svg;
+  document.getElementById('chart_total').textContent =
+    days+' 天總計：'+totalAll+' 筆（成功 '+totalOk+' / 失敗 '+totalFail+'）';
 }
 async function loadAudit(){
   const filter = document.getElementById('audit_filter').value;
@@ -577,15 +653,13 @@ async function loadAudit(){
   }
 }
 async function clearAudit(){
-  const days = prompt('清掉多少天前的紀錄？（輸入數字；輸入 0 全清）', '30');
-  if (days === null) return;
-  const n = parseInt(days, 10);
-  if (isNaN(n) || n < 0) return toast('請輸入有效數字', true);
-  if (!confirm(n === 0 ? '確定全部清光？' : '確定清掉 ' + n + ' 天前的紀錄？')) return;
+  const n = parseInt(document.getElementById('audit_clear_days').value, 10);
+  if (isNaN(n) || n < 0) return toast('請輸入 0 或以上的數字', true);
+  if (!confirm(n === 0 ? '確定全部清光所有紀錄？' : '確定清掉 ' + n + ' 天前的紀錄？')) return;
   const r = await api('/admin/audit/clear', {admin_pwd: ADM, older_than_days: n});
   if (!r.ok) return toast(r.reason || '失敗', true);
   toast(r.msg || '已清');
-  loadStats();
+  loadDaily();
   loadAudit();
 }
 async function loadState(){
