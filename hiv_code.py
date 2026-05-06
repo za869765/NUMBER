@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.40"
+VERSION = "1.0.41"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -3255,14 +3255,18 @@ class App:
 # 完全不允許離線：連不到網路或 worker 回 ok=false 即拒絕。
 # 管理員可在 cloud_auth/admin 改密碼或停用所有 EXE。
 def cloud_verify(password):
-    """回傳 (ok: bool, reason: str)。reason 直接顯示給使用者。"""
+    """回傳 (ok: bool, reason: str)。reason 直接顯示給使用者。
+    v1.0.41：加 User-Agent，繞過 Cloudflare 對 Python-urllib 的 1010 阻擋"""
     import urllib.request
     import urllib.error
     body = json.dumps({"password": password}).encode("utf-8")
     req = urllib.request.Request(
         CLOUD_AUTH_URL.rstrip("/") + "/verify",
         data=body,
-        headers={"Content-Type": "application/json;charset=utf-8"},
+        headers={
+            "Content-Type": "application/json;charset=utf-8",
+            "User-Agent": f"HIV-Auth-Client/{VERSION} (Windows)",
+        },
         method="POST",
     )
     try:
