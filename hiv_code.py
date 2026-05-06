@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.41"
+VERSION = "1.0.42"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -472,8 +472,8 @@ class CanvasProgressBar(tk.Canvas):
         self.itemconfigure(self.bar, fill=fg)
 
 # ── 工具函式 ──────────────────────────────────────
-def _hide_dir(path):
-    """v1.0.40：把 Windows 資料夾標 HIDDEN 屬性，工作資料夾不要長一堆礙眼"""
+def _hide_path(path):
+    """v1.0.40/42：把 Windows 檔案或資料夾標 HIDDEN 屬性，工作目錄不要長一堆礙眼"""
     try:
         import ctypes
         FILE_ATTRIBUTE_HIDDEN = 0x02
@@ -487,7 +487,7 @@ def ensure_outdir():
     for sub in ("old", "log", "debug"):
         p = os.path.join(OUTPUT_DIR, sub)
         os.makedirs(p, exist_ok=True)
-        _hide_dir(p)
+        _hide_path(p)
 
 # ── 全域 log file（每次啟動 GUI 開新檔） ──
 _LOG_FP = None
@@ -3030,6 +3030,7 @@ class App:
             merged = {**existing, **self._collect_settings()}
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(merged, f, ensure_ascii=False, indent=2)
+            _hide_path(SETTINGS_FILE)  # v1.0.42 隱藏 settings.json
         except Exception as e:
             self.log(f"⚠ 設定存檔失敗：{e}")
 
