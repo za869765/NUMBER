@@ -6,15 +6,11 @@ cd /d %~dp0
 set "OUT_DIR=D:\Backup\Desktop\CODE\number"
 set "OLD_DIR=%OUT_DIR%\old"
 
-REM v1.0.38：必須先有 _secret.py（主密碼）才能編
-if not exist "_secret.py" (
-  echo.
-  echo X 找不到 _secret.py 主密碼設定檔
-  echo   請先執行 set_master_password.bat 設定主密碼
-  echo.
-  pause
-  exit /b 1
-)
+REM v1.0.39：主密碼改為雲端授權，不再需要 _secret.py
+REM 如果還在編 EXE 前，請先：
+REM   1. cd cloud_auth ^&^& npm install ^&^& npx wrangler login
+REM   2. 部署 worker 並設管理員密碼（見 cloud_auth\README.md）
+REM   3. 確認 hiv_code.py 內 CLOUD_AUTH_URL 是你的 worker 網址
 
 echo [1/4] 確保 %OUT_DIR%\old 存在
 if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"

@@ -1,0 +1,13 @@
+name = "hiv-auth"
+main = "src/index.js"
+compatibility_date = "2026-05-01"
+
+# 部署後填入：執行 `npx wrangler d1 create hiv-auth-db` 取得 database_id
+[[d1_databases]]
+binding = "DB"
+database_name = "hiv-auth-db"
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+# 管理員密碼（SHA-256 hex）— 用 wrangler secret 設定，不要寫在這
+# 部署前執行：npx wrangler secret put ADMIN_PASSWORD_HASH
+# 然後貼上：echo -n 你的管理員密碼 | sha256sum 的結果

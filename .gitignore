@@ -11,7 +11,6 @@ __pycache__/
 debug/
 log/
 
-# v1.0.38 主密碼嵌入：本機產生，絕對不可進 repo
-_secret.py
-_secret.pyc
+# v1.0.39 雲端授權：worker 部署在 cloud_auth/，無 _secret.py
+# settings.json 仍是本機檔，不進 repo
 settings.json

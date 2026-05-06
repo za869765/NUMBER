@@ -18,8 +18,13 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.38"
+VERSION = "1.0.39"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
+
+# v1.0.39 雲端授權服務（Cloudflare Worker URL）
+# 部署 cloud_auth/ 後得到的 workers.dev 網址貼這
+CLOUD_AUTH_URL = "https://hiv-auth.za869765.workers.dev"
+CLOUD_AUTH_TIMEOUT = 8  # 秒
 
 # ── v1.0.28：lazy import selenium → 啟動加速 ──
 # 不在 import 階段載入 selenium（拖慢 EXE 冷啟動約 1-2 秒）
@@ -3234,42 +3239,42 @@ class App:
             pass
 
 
-# ── v1.0.38 主密碼閘（編譯期嵌入）──────────────────
-# 密碼 hash 來自 _secret.py（gitignore），用 set_master_password.bat 產生。
-# 任何 EXE 只接受編譯時嵌入的那組密碼；
-# 使用者本機跑 .py 時若沒有 _secret.py 會直接拒絕進入。
-# 演算法：PBKDF2-HMAC-SHA256 / 200000 輪 / 16 byte 隨機 salt
-try:
-    from _secret import (
-        MASTER_PASSWORD_HASH,
-        MASTER_PASSWORD_SALT_HEX,
-        PBKDF2_ITERATIONS,
+# ── v1.0.39 雲端授權閘 ───────────────────────────────
+# 啟動時連線 CLOUD_AUTH_URL/verify 驗證密碼。
+# 完全不允許離線：連不到網路或 worker 回 ok=false 即拒絕。
+# 管理員可在 cloud_auth/admin 改密碼或停用所有 EXE。
+def cloud_verify(password):
+    """回傳 (ok: bool, reason: str)。reason 直接顯示給使用者。"""
+    import urllib.request
+    import urllib.error
+    body = json.dumps({"password": password}).encode("utf-8")
+    req = urllib.request.Request(
+        CLOUD_AUTH_URL.rstrip("/") + "/verify",
+        data=body,
+        headers={"Content-Type": "application/json;charset=utf-8"},
+        method="POST",
     )
-except ImportError:
-    MASTER_PASSWORD_HASH = ""
-    MASTER_PASSWORD_SALT_HEX = ""
-    PBKDF2_ITERATIONS = 200000
-
-
-def _hash_password(pw):
-    salt = bytes.fromhex(MASTER_PASSWORD_SALT_HEX) if MASTER_PASSWORD_SALT_HEX else b""
-    return hashlib.pbkdf2_hmac(
-        "sha256", pw.encode("utf-8"), salt, PBKDF2_ITERATIONS
-    ).hex()
+    try:
+        with urllib.request.urlopen(req, timeout=CLOUD_AUTH_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if data.get("ok"):
+            return True, ""
+        return False, data.get("reason", "驗證失敗")
+    except urllib.error.HTTPError as e:
+        try:
+            data = json.loads(e.read().decode("utf-8"))
+            return False, data.get("reason", f"伺服器錯誤 HTTP {e.code}")
+        except Exception:
+            return False, f"伺服器錯誤 HTTP {e.code}"
+    except urllib.error.URLError as e:
+        reason = getattr(e, "reason", str(e))
+        return False, f"連線失敗：{reason}（請確認網路）"
+    except Exception as e:
+        return False, f"請求失敗：{e}"
 
 
 def show_password_gate(parent):
-    """v1.0.38：對 _secret.MASTER_PASSWORD_HASH 比對；最多 5 次失敗。
-    回傳 True=通過、False=取消／失敗上限。"""
-    if not MASTER_PASSWORD_HASH or not MASTER_PASSWORD_SALT_HEX:
-        messagebox.showerror(
-            "未設定主密碼",
-            "本程式未嵌入主密碼。\n\n"
-            "請先在程式碼資料夾跑 set_master_password.bat\n"
-            "產生 _secret.py 後重新編譯。",
-        )
-        return False
-
+    """v1.0.39 每次啟動連線雲端驗證；無離線寬限。"""
     dlg = tk.Toplevel(parent)
     dlg.title("HIV 取號工具 — 登入")
     dlg.resizable(False, False)
@@ -3278,8 +3283,6 @@ def show_password_gate(parent):
     dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
 
     result = {"ok": False}
-    attempts = {"count": 0}
-    MAX_ATTEMPTS = 5
 
     frm = tk.Frame(dlg, padx=24, pady=18, bg="#eef5fa")
     frm.pack(fill="both", expand=True)
@@ -3287,7 +3290,7 @@ def show_password_gate(parent):
     tk.Label(frm, text="🔐 HIV 匿名諮詢代碼批次取號工具",
              font=("Microsoft JhengHei", 13, "bold"),
              bg="#eef5fa", fg="#1565c0").pack(anchor="w")
-    tk.Label(frm, text="請輸入主密碼以使用此工具",
+    tk.Label(frm, text="連線雲端驗證主密碼（需網路）",
              font=("Microsoft JhengHei", 9),
              bg="#eef5fa", fg="#666").pack(anchor="w", pady=(2, 14))
     tk.Label(frm, text="密碼：", bg="#eef5fa",
@@ -3295,32 +3298,48 @@ def show_password_gate(parent):
     e1 = tk.Entry(frm, show="*", width=32, font=("Microsoft JhengHei", 11))
     e1.pack(anchor="w", pady=(2, 4))
     msg = tk.Label(frm, text="", fg="#c62828", bg="#eef5fa",
-                   font=("Microsoft JhengHei", 9))
+                   font=("Microsoft JhengHei", 9), wraplength=320, justify="left")
     msg.pack(anchor="w", pady=(4, 0))
 
+    busy = {"v": False}
+    btn_login = None
+
     def do_login():
+        if busy["v"]:
+            return
         p = e1.get()
-        if _hash_password(p) == MASTER_PASSWORD_HASH:
+        if not p:
+            msg.config(text="✗ 請輸入密碼")
+            return
+        busy["v"] = True
+        msg.config(text="🌐 連線雲端驗證中…", fg="#1565c0")
+        btn_login.config(state="disabled")
+        e1.config(state="disabled")
+        dlg.update_idletasks()
+        try:
+            ok, reason = cloud_verify(p)
+        finally:
+            busy["v"] = False
+            try:
+                e1.config(state="normal")
+                btn_login.config(state="normal")
+            except Exception:
+                pass
+        if ok:
             result["ok"] = True
             dlg.destroy()
-            return
-        attempts["count"] += 1
-        left = MAX_ATTEMPTS - attempts["count"]
-        if left <= 0:
-            msg.config(text="✗ 已達失敗上限，程式即將關閉")
-            e1.config(state="disabled")
-            dlg.after(1500, dlg.destroy)
         else:
-            msg.config(text=f"✗ 密碼錯誤（剩 {left} 次）")
+            msg.config(text=f"✗ {reason}", fg="#c62828")
             e1.delete(0, tk.END)
             e1.focus()
 
     btnf = tk.Frame(frm, bg="#eef5fa")
     btnf.pack(anchor="e", pady=(14, 0))
-    tk.Button(btnf, text="登入", width=10, command=do_login,
+    btn_login = tk.Button(btnf, text="登入", width=10, command=do_login,
               bg="#1565c0", fg="white",
               font=("Microsoft JhengHei", 10, "bold"),
-              relief="flat", padx=8, pady=4).pack(side="left", padx=4)
+              relief="flat", padx=8, pady=4)
+    btn_login.pack(side="left", padx=4)
     tk.Button(btnf, text="取消", width=8, command=dlg.destroy,
               font=("Microsoft JhengHei", 10),
               relief="flat", padx=8, pady=4).pack(side="left")

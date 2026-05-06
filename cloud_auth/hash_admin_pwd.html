@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>SHA-256 Hash 產生器</title>
+<style>
+body{font:14px/1.6 "Microsoft JhengHei",sans-serif;background:#eef5fa;color:#1a2a3a;padding:30px;max-width:600px;margin:0 auto}
+h1{color:#1565c0;margin:0 0 8px}
+.sub{color:#666;margin-bottom:20px}
+input{width:100%;padding:10px;border:1px solid #cfd8dc;border-radius:4px;font:inherit;margin-bottom:8px}
+.out{background:#fff;padding:12px;border-radius:4px;border:1px solid #cfd8dc;font-family:Consolas,monospace;font-size:13px;word-break:break-all;min-height:48px;color:#0d47a1}
+button{background:#1565c0;color:#fff;border:0;padding:8px 16px;border-radius:4px;font:inherit;cursor:pointer;margin-top:8px}
+button:hover{background:#0d47a1}
+</style>
+</head>
+<body>
+<h1>SHA-256 Hash 產生器</h1>
+<p class="sub">在這裡輸入你想當「管理員密碼」的字串，複製產生的 hash 用 <code>npx wrangler secret put ADMIN_PASSWORD_HASH</code> 設定。<br>
+<strong>本頁面在你的瀏覽器本機計算，不會傳到任何伺服器。</strong></p>
+<input id="pwd" type="password" placeholder="輸入想當管理員密碼的字串…" autofocus>
+<input id="pwd2" type="text" placeholder="（如果想看明文，輸入到這格）">
+<div class="out" id="out">（hash 會顯示在這裡）</div>
+<button onclick="copyOut()">複製 hash</button>
+
+<script>
+async function sha256(s){
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2,'0')).join('');
+}
+async function update(){
+  const v = document.getElementById('pwd').value || document.getElementById('pwd2').value;
+  document.getElementById('out').textContent = v ? await sha256(v) : '（hash 會顯示在這裡）';
+}
+function copyOut(){
+  const t = document.getElementById('out').textContent;
+  if (t.startsWith('（')) return;
+  navigator.clipboard.writeText(t);
+  alert('已複製 hash');
+}
+document.getElementById('pwd').addEventListener('input', update);
+document.getElementById('pwd2').addEventListener('input', update);
+</script>
+</body>
+</html>

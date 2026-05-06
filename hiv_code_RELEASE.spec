@@ -46,8 +46,8 @@ hidden_selenium = [
 hidden_others = ['openpyxl', 'openpyxl.styles', 'openpyxl.worksheet.datavalidation',
                  'openpyxl.comments',
                  'urllib3', 'trio', 'trio_websocket', 'outcome', 'sniffio',
-                 'attrs', 'websocket', 'wsproto', 'h11', 'idna', 'certifi',
-                 '_secret']  # v1.0.38 主密碼（gitignore，build 期需存在）
+                 'attrs', 'websocket', 'wsproto', 'h11', 'idna', 'certifi']
+# v1.0.39 雲端授權只用 stdlib urllib + ssl，不需 hidden import
 
 a = Analysis(
     ['hiv_code.py'],
