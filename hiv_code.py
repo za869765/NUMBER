@@ -42,7 +42,15 @@ EDUS    = ["不識字", "國中以下", "高中職", "專科或大學", "研究�
 ORIENTS = ["同性", "雙性", "異性"]
 TESTING = ["否", "從未做過"]
 
-OUTPUT_DIR = r"D:\Backup\Desktop\CODE\number"   # v1.0.15：可由 UI 動態變更（settings.json 持久化）
+def _default_output_dir():
+    """v1.0.36：預設輸出目錄
+       - EXE：與 EXE 同層資料夾（可攜，移到任何電腦都自動指向 EXE 旁邊）
+       - 開發環境（.py）：沿用 D:\\Backup\\Desktop\\CODE\\number 舊路徑"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return r"D:\Backup\Desktop\CODE\number"
+
+OUTPUT_DIR = _default_output_dir()  # v1.0.15：可由 UI 動態變更（settings.json 持久化）
 DEFAULT_OUTPUT_DIR = OUTPUT_DIR
 
 def _settings_path():
@@ -503,8 +511,8 @@ def archive_old_outputs(log_fn=None):
                 continue
             if not (fn.lower().endswith(".xlsx") or fn.lower().endswith(".csv")):
                 continue
-            # v1.0.17：codes_<TODAY>_*.xlsx 留下，給同日合併用
-            if fn.startswith(f"codes_{today}_"):
+            # v1.0.36：今天的 HIV_CODE 檔留下供同日合併
+            if fn == f"{today}_HIV_CODE.xlsx":
                 continue
             try:
                 import shutil
@@ -2251,32 +2259,28 @@ class App:
             ensure_outdir()
             if not self._current_xlsx_path:
                 today = datetime.datetime.now().strftime("%Y%m%d")
-                same_day = sorted([
-                    fn for fn in os.listdir(OUTPUT_DIR)
-                    if fn.startswith(f"codes_{today}_") and fn.lower().endswith(".xlsx")
-                       and os.path.isfile(os.path.join(OUTPUT_DIR, fn))
-                ])
+                # v1.0.36：固定用「日期_HIV_CODE.xlsx」，同日唯一檔案
+                today_fname = f"{today}_HIV_CODE.xlsx"
+                today_full = os.path.join(OUTPUT_DIR, today_fname)
                 self._existing_rows = []
-                if same_day:
-                    target = os.path.join(OUTPUT_DIR, same_day[-1])
+                if os.path.isfile(today_full):
                     try:
-                        wb_old = load_workbook(target)
+                        wb_old = load_workbook(today_full)
                         ws_old = wb_old.active
                         old_all = list(ws_old.iter_rows(values_only=True))
                         if old_all:
                             old_headers = list(old_all[0])
                             old_rows = [r for r in old_all[1:] if any(c not in (None, "") for c in r)]
                             self._existing_rows = _normalize_existing(old_rows, old_headers)
-                        self._current_xlsx_path = target
-                        self.log(f"📁 偵測到同日舊檔 {same_day[-1]}（{len(self._existing_rows)} 筆），將合併寫入")
+                        self._current_xlsx_path = today_full
+                        self.log(f"📁 偵測到同日舊檔 {today_fname}（{len(self._existing_rows)} 筆），將合併寫入")
                     except Exception as e:
                         self.log(f"⚠ 讀取同日舊檔失敗，改開新檔：{e}")
                         self._existing_rows = []
                         self._current_xlsx_path = None
                 if not self._current_xlsx_path:
                     archive_old_outputs(self.log)
-                    fname = f"codes_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-                    self._current_xlsx_path = os.path.join(OUTPUT_DIR, fname)
+                    self._current_xlsx_path = today_full
                     self._existing_rows = []
             wb = Workbook()
             # v1.0.35：主分頁「全部」+ 路徑分頁
