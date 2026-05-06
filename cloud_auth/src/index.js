@@ -111,17 +111,23 @@ async function handleAdminState(request, env) {
   if (!(await checkAdmin(body.admin_pwd, env))) {
     return jsonReply({ ok: false, reason: '管理員密碼錯誤' }, 401);
   }
-  const row =
+  const main =
     (await env.DB.prepare(
-      'SELECT password_hash, message, killed, updated_at FROM auth WHERE id = 1'
+      'SELECT password_hash, password_plain, message, killed, updated_at FROM auth WHERE id = 1'
+    ).first()) || {};
+  const admin =
+    (await env.DB.prepare(
+      'SELECT password_plain FROM auth WHERE id = 2'
     ).first()) || {};
   return jsonReply({
     ok: true,
     state: {
-      password_set: !!row.password_hash,
-      message: row.message || '',
-      killed: !!row.killed,
-      updated_at: row.updated_at || '',
+      password_set: !!main.password_hash,
+      password_plain: main.password_plain || '',
+      admin_plain: admin.password_plain || '',
+      message: main.message || '',
+      killed: !!main.killed,
+      updated_at: main.updated_at || '',
     },
   });
 }
@@ -142,11 +148,27 @@ async function handleAdminUpdate(request, env) {
     }
     const hash = await sha256Hex(value);
     await env.DB.prepare(
-      'UPDATE auth SET password_hash = ?1, updated_at = ?2 WHERE id = 1'
+      'UPDATE auth SET password_hash = ?1, password_plain = ?2, updated_at = ?3 WHERE id = 1'
     )
-      .bind(hash, now)
+      .bind(hash, value, now)
       .run();
     return jsonReply({ ok: true, msg: '主密碼已更新' });
+  }
+
+  if (action === 'set_admin_password') {
+    if (!value || typeof value !== 'string' || value.length < 4) {
+      return jsonReply({ ok: false, reason: '密碼至少 4 字' }, 400);
+    }
+    const hash = await sha256Hex(value);
+    await env.DB.prepare(
+      'UPDATE auth SET password_hash = ?1, password_plain = ?2, updated_at = ?3 WHERE id = 2'
+    )
+      .bind(hash, value, now)
+      .run();
+    return jsonReply({
+      ok: true,
+      msg: '管理員密碼已更新（下次登入請用新密碼）',
+    });
   }
 
   if (action === 'set_message') {
@@ -252,10 +274,20 @@ async function handleAdminAuditClear(request, env) {
 }
 
 // ── 工具 ───────────────────────────────────────
+// v1.0.43：admin pwd 改放 D1 row id=2，wrangler secret 留作 fallback
 async function checkAdmin(pwd, env) {
-  if (!pwd || !env.ADMIN_PASSWORD_HASH) return false;
+  if (!pwd) return false;
   const h = await sha256Hex(pwd);
-  return h === env.ADMIN_PASSWORD_HASH;
+  try {
+    const row = await env.DB.prepare(
+      'SELECT password_hash FROM auth WHERE id = 2'
+    ).first();
+    if (row && row.password_hash) return h === row.password_hash;
+  } catch {
+    /* fall through to env */
+  }
+  if (env.ADMIN_PASSWORD_HASH) return h === env.ADMIN_PASSWORD_HASH;
+  return false;
 }
 
 async function sha256Hex(text) {
@@ -342,7 +374,16 @@ const ADMIN_HTML = `<!doctype html>
     <div class="card">
       <h2>目前狀態</h2>
       <div class="state">
-        <div class="k">主密碼</div><div class="v" id="s_pwd">—</div>
+        <div class="k">主密碼（EXE）</div>
+        <div class="v">
+          <span id="s_pwd_plain" style="font-family:Consolas,monospace;background:#f5f9fc;padding:2px 8px;border-radius:3px"></span>
+          <button class="ghost" style="padding:2px 8px;font-size:11px;margin-left:6px" onclick="togglePwd('pwd')">👁 顯示</button>
+        </div>
+        <div class="k">管理員密碼</div>
+        <div class="v">
+          <span id="s_admin_plain" style="font-family:Consolas,monospace;background:#f5f9fc;padding:2px 8px;border-radius:3px"></span>
+          <button class="ghost" style="padding:2px 8px;font-size:11px;margin-left:6px" onclick="togglePwd('admin')">👁 顯示</button>
+        </div>
         <div class="k">服務狀態</div><div class="v" id="s_kill">—</div>
         <div class="k">停用訊息</div><div class="v" id="s_msg">—</div>
         <div class="k">最近更新</div><div class="v" id="s_at">—</div>
@@ -351,11 +392,19 @@ const ADMIN_HTML = `<!doctype html>
     </div>
 
     <div class="card">
-      <h2>更新主密碼</h2>
+      <h2>更新主密碼（EXE 登入用）</h2>
       <p style="margin:0 0 8px;color:#666;font-size:13px">所有 EXE 都會立刻使用新密碼。舊密碼立刻失效。</p>
       <label>新密碼（至少 4 字）</label>
       <input id="newpwd" type="password">
       <button onclick="setPwd()">送出新密碼</button>
+    </div>
+
+    <div class="card">
+      <h2>更新管理員密碼（這個後台用）</h2>
+      <p style="margin:0 0 8px;color:#c62828;font-size:13px">⚠ 改完後，下次登入這個後台要用新密碼。</p>
+      <label>新管理員密碼（至少 4 字）</label>
+      <input id="new_admin_pwd" type="password">
+      <button onclick="setAdminPwd()">送出新管理員密碼</button>
     </div>
 
     <div class="card">
@@ -468,7 +517,13 @@ async function login(){
 function fmt(ts){
   if(!ts) return '—';
   try{
-    return new Date(ts.replace(' ','T')+'Z').toLocaleString('zh-TW',{hour12:false});
+    let s = String(ts);
+    // 兩種格式：ISO ("2026-05-06T16:47:35.735Z") 或 SQLite ("2026-05-06 16:47:35")
+    if (!s.includes('T')) s = s.replace(' ', 'T');
+    if (!s.endsWith('Z') && !/[+-]\\d{2}:?\\d{2}$/.test(s)) s += 'Z';
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return ts;
+    return d.toLocaleString('zh-TW',{hour12:false});
   }catch{return ts;}
 }
 async function loadStats(){
@@ -538,17 +593,29 @@ async function loadState(){
   if (!r.ok) return toast(r.reason || '失敗', true);
   renderState(r.state);
 }
+let _pwdShown = {pwd:false, admin:false};
+let _curState = {};
+function maskPwd(s){
+  if (!s) return '(尚未存明文 — 改一次密碼後才看得到)';
+  return '•'.repeat(Math.min(12, s.length));
+}
+function togglePwd(which){
+  _pwdShown[which] = !_pwdShown[which];
+  const elId = which === 'pwd' ? 's_pwd_plain' : 's_admin_plain';
+  const v = which === 'pwd' ? _curState.password_plain : _curState.admin_plain;
+  document.getElementById(elId).textContent = _pwdShown[which] ? (v || '(尚未存明文)') : maskPwd(v);
+}
 function renderState(s){
-  const pwd = document.getElementById('s_pwd');
+  _curState = s;
+  document.getElementById('s_pwd_plain').textContent = maskPwd(s.password_plain);
+  document.getElementById('s_admin_plain').textContent = maskPwd(s.admin_plain);
+  _pwdShown = {pwd:false, admin:false};
   const kill = document.getElementById('s_kill');
-  pwd.innerHTML = s.password_set
-    ? '<span class="pill ok">已設定</span>'
-    : '<span class="pill bad">未設定（EXE 無法登入）</span>';
   kill.innerHTML = s.killed
     ? '<span class="pill bad">🛑 已停用</span>'
     : '<span class="pill ok">✅ 服務中</span>';
   document.getElementById('s_msg').textContent = s.message || '(空)';
-  document.getElementById('s_at').textContent = s.updated_at || '—';
+  document.getElementById('s_at').textContent = fmt(s.updated_at) || '—';
   document.getElementById('msg').value = s.message || '';
 }
 async function setPwd(){
@@ -557,6 +624,17 @@ async function setPwd(){
   const r = await api('/admin/update', {admin_pwd: ADM, action:'set_password', value:v});
   if (!r.ok) return toast(r.reason || '失敗', true);
   document.getElementById('newpwd').value = '';
+  toast(r.msg || '已更新');
+  loadState();
+}
+async function setAdminPwd(){
+  const v = document.getElementById('new_admin_pwd').value;
+  if (!v || v.length < 4) return toast('密碼至少 4 字', true);
+  if (!confirm('確定要把管理員密碼改成「' + v + '」？下次登入這個後台要用新密碼。')) return;
+  const r = await api('/admin/update', {admin_pwd: ADM, action:'set_admin_password', value:v});
+  if (!r.ok) return toast(r.reason || '失敗', true);
+  document.getElementById('new_admin_pwd').value = '';
+  ADM = v;  // 更新內部 token，避免下個 API 失敗
   toast(r.msg || '已更新');
   loadState();
 }
