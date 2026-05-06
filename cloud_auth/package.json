@@ -8,6 +8,6 @@
     "init-db": "wrangler d1 execute hiv-auth-db --remote --file=migrations/0001_init.sql"
   },
   "devDependencies": {
-    "wrangler": "^3.80.0"
+    "wrangler": "^4.88.0"
   }
 }

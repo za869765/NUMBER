@@ -6,7 +6,7 @@ compatibility_date = "2026-05-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "hiv-auth-db"
-database_id = "REPLACE_WITH_YOUR_D1_ID"
+database_id = "fee8cf82-4c08-4c51-b0bc-c3f207885c11"
 
 # 管理員密碼（SHA-256 hex）— 用 wrangler secret 設定，不要寫在這
 # 部署前執行：npx wrangler secret put ADMIN_PASSWORD_HASH

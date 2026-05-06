@@ -23,7 +23,10 @@ for %%F in ("%OUT_DIR%\HIV*.exe") do (
 )
 
 echo [3/4] PyInstaller 編譯 → 輸出到 %OUT_DIR%
-"C:\Users\MIHC\AppData\Local\Programs\Python\Python311\python.exe" -m PyInstaller hiv_code_RELEASE.spec --noconfirm --distpath "%OUT_DIR%" --workpath "build"
+REM v1.0.39：用 PATH 上的 python（pyinstaller 模組找得到即可）
+REM 若你電腦有特定 Python 版本想用，把下面 set PY 改絕對路徑
+set "PY=python"
+"%PY%" -m PyInstaller hiv_code_RELEASE.spec --noconfirm --distpath "%OUT_DIR%" --workpath "build"
 if errorlevel 1 (
   echo.
   echo X 編譯失敗，請看上方錯誤訊息

@@ -32,6 +32,15 @@ export default {
       if (path === '/admin/update' && request.method === 'POST') {
         return await handleAdminUpdate(request, env);
       }
+      if (path === '/admin/audit' && request.method === 'POST') {
+        return await handleAdminAudit(request, env);
+      }
+      if (path === '/admin/audit/stats' && request.method === 'POST') {
+        return await handleAdminStats(request, env);
+      }
+      if (path === '/admin/audit/clear' && request.method === 'POST') {
+        return await handleAdminAuditClear(request, env);
+      }
       if (path === '/' || path === '/health') {
         return new Response('hiv-auth ok', { status: 200 });
       }
@@ -48,26 +57,52 @@ async function handleVerify(request, env) {
   try {
     body = await request.json();
   } catch {
+    await logAudit(request, env, false, '格式錯誤');
     return jsonReply({ ok: false, reason: '格式錯誤' }, 400);
   }
   const pwd = (body && body.password) || '';
   if (!pwd) {
+    await logAudit(request, env, false, '密碼空白');
     return jsonReply({ ok: false, reason: '密碼空白' }, 400);
   }
   const row = await env.DB.prepare(
     'SELECT password_hash, message, killed FROM auth WHERE id = 1'
   ).first();
   if (!row || !row.password_hash) {
+    await logAudit(request, env, false, '伺服器未設密碼');
     return jsonReply({ ok: false, reason: '伺服器尚未設定密碼，請聯絡管理員' }, 503);
   }
   if (row.killed) {
+    await logAudit(request, env, false, 'killed');
     return jsonReply({ ok: false, reason: row.message || '本服務已停用，請聯絡管理員' }, 403);
   }
   const hash = await sha256Hex(pwd);
   if (hash === row.password_hash) {
+    await logAudit(request, env, true, '');
     return jsonReply({ ok: true });
   }
+  await logAudit(request, env, false, '密碼錯誤');
   return jsonReply({ ok: false, reason: '密碼錯誤' }, 401);
+}
+
+// 寫一筆 audit log（fire-and-forget，失敗不影響主流程）
+async function logAudit(request, env, ok, reason) {
+  try {
+    const ip = request.headers.get('cf-connecting-ip') || '';
+    const country =
+      (request.cf && request.cf.country) ||
+      request.headers.get('cf-ipcountry') ||
+      '';
+    const ua = (request.headers.get('user-agent') || '').slice(0, 200);
+    const ts = new Date().toISOString();
+    await env.DB.prepare(
+      'INSERT INTO audit (ts, ip, country, ua, ok, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6)'
+    )
+      .bind(ts, ip, country, ua, ok ? 1 : 0, reason || '')
+      .run();
+  } catch {
+    /* swallow */
+  }
 }
 
 // ── 管理員：讀狀態 ────────────────────────────
@@ -139,6 +174,83 @@ async function handleAdminUpdate(request, env) {
   return jsonReply({ ok: false, reason: '不明動作' }, 400);
 }
 
+// ── 管理員：audit log 列表 ────────────────────
+async function handleAdminAudit(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await checkAdmin(body.admin_pwd, env))) {
+    return jsonReply({ ok: false, reason: '管理員密碼錯誤' }, 401);
+  }
+  const limit = Math.min(500, Math.max(10, parseInt(body.limit, 10) || 50));
+  const filter = body.filter || 'all'; // all / ok / fail
+  let where = '';
+  if (filter === 'ok') where = 'WHERE ok = 1';
+  else if (filter === 'fail') where = 'WHERE ok = 0';
+  const sql = `SELECT id, ts, ip, country, ua, ok, reason FROM audit ${where} ORDER BY id DESC LIMIT ?1`;
+  const r = await env.DB.prepare(sql).bind(limit).all();
+  return jsonReply({ ok: true, rows: r.results || [] });
+}
+
+// ── 管理員：統計摘要 ────────────────────────
+async function handleAdminStats(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await checkAdmin(body.admin_pwd, env))) {
+    return jsonReply({ ok: false, reason: '管理員密碼錯誤' }, 401);
+  }
+  const stats = {};
+  // 24h
+  const r24 = await env.DB.prepare(
+    `SELECT COUNT(*) AS total,
+            SUM(CASE WHEN ok=1 THEN 1 ELSE 0 END) AS ok_cnt,
+            SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END) AS fail_cnt,
+            COUNT(DISTINCT ip) AS uniq_ip
+     FROM audit WHERE ts >= datetime('now', '-1 day')`
+  ).first();
+  // 7d
+  const r7 = await env.DB.prepare(
+    `SELECT COUNT(*) AS total,
+            SUM(CASE WHEN ok=1 THEN 1 ELSE 0 END) AS ok_cnt,
+            SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END) AS fail_cnt,
+            COUNT(DISTINCT ip) AS uniq_ip
+     FROM audit WHERE ts >= datetime('now', '-7 days')`
+  ).first();
+  // top IPs（過去 7 天）
+  const topIps = await env.DB.prepare(
+    `SELECT ip, country,
+            COUNT(*) AS total,
+            SUM(CASE WHEN ok=1 THEN 1 ELSE 0 END) AS ok_cnt,
+            SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END) AS fail_cnt,
+            MAX(ts) AS last_seen
+     FROM audit WHERE ts >= datetime('now', '-7 days')
+     GROUP BY ip ORDER BY total DESC LIMIT 10`
+  ).all();
+  return jsonReply({
+    ok: true,
+    last_24h: r24 || {},
+    last_7d: r7 || {},
+    top_ips: topIps.results || [],
+  });
+}
+
+// ── 管理員：清空 audit ───────────────────────
+async function handleAdminAuditClear(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await checkAdmin(body.admin_pwd, env))) {
+    return jsonReply({ ok: false, reason: '管理員密碼錯誤' }, 401);
+  }
+  const days = parseInt(body.older_than_days, 10);
+  if (days > 0) {
+    const r = await env.DB.prepare(
+      `DELETE FROM audit WHERE ts < datetime('now', ?1)`
+    )
+      .bind(`-${days} days`)
+      .run();
+    return jsonReply({ ok: true, msg: `已清掉 ${days} 天前的紀錄`, meta: r.meta });
+  }
+  // 全清
+  const r = await env.DB.prepare(`DELETE FROM audit`).run();
+  return jsonReply({ ok: true, msg: '全部紀錄已清空', meta: r.meta });
+}
+
 // ── 工具 ───────────────────────────────────────
 async function checkAdmin(pwd, env) {
   if (!pwd || !env.ADMIN_PASSWORD_HASH) return false;
@@ -170,7 +282,7 @@ const ADMIN_HTML = `<!doctype html>
 <style>
   *{box-sizing:border-box}
   body{font:14px/1.6 "Microsoft JhengHei","Segoe UI",sans-serif;background:#eef5fa;color:#1a2a3a;margin:0;padding:24px}
-  .wrap{max-width:640px;margin:0 auto}
+  .wrap{max-width:880px;margin:0 auto}
   h1{margin:0 0 8px;color:#1565c0;font-size:22px}
   .sub{color:#666;margin-bottom:24px}
   .card{background:#fff;border-radius:8px;padding:18px 22px;margin-bottom:16px;box-shadow:0 2px 8px rgba(21,101,192,.08)}
@@ -191,12 +303,27 @@ const ADMIN_HTML = `<!doctype html>
   .pill.ok{background:#c8e6c9;color:#1b5e20}
   .pill.bad{background:#ffcdd2;color:#b71c1c}
   .pill.muted{background:#eceff1;color:#546e7a}
-  .row{display:flex;gap:8px;align-items:flex-end}
+  .row{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap}
   .row>:first-child{flex:1}
   .toast{position:fixed;top:20px;right:20px;background:#0d47a1;color:#fff;padding:12px 20px;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.2);z-index:99;animation:slide .3s ease;max-width:400px}
   .toast.err{background:#c62828}
   @keyframes slide{from{transform:translateX(120%)}to{transform:translateX(0)}}
   .hidden{display:none}
+  .stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .stat-box{background:#f5f9fc;padding:10px 14px;border-radius:6px;border-left:3px solid #1565c0}
+  .stat-box .label{color:#546e7a;font-size:12px}
+  .stat-box .num{font-size:18px;font-weight:700;color:#0d47a1}
+  .stat-box .num.bad{color:#c62828}
+  .stat-box .num.ok{color:#1b5e20}
+  table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
+  th{background:#1565c0;color:#fff;padding:6px 8px;text-align:left;font-weight:600;position:sticky;top:0}
+  td{padding:5px 8px;border-bottom:1px solid #eceff1;vertical-align:top}
+  tr:hover td{background:#f5f9fc}
+  td.ip{font-family:Consolas,monospace}
+  td.ts{white-space:nowrap;color:#546e7a}
+  td.ua{color:#546e7a;font-size:11px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .scroll{max-height:380px;overflow-y:auto;border:1px solid #cfd8dc;border-radius:4px}
+  select{padding:6px 8px;border:1px solid #cfd8dc;border-radius:4px;font:inherit}
 </style>
 </head>
 <body>
@@ -246,6 +373,62 @@ const ADMIN_HTML = `<!doctype html>
         <button onclick="setKill(0)">✅ 恢復服務</button>
       </div>
     </div>
+
+    <div class="card">
+      <h2>📊 使用統計</h2>
+      <div class="row" style="margin-bottom:10px">
+        <h3 style="margin:0;font-size:13px;color:#546e7a">最近 24 小時</h3>
+      </div>
+      <div class="stat-grid" id="stat_24h">
+        <div class="stat-box"><div class="label">總請求</div><div class="num" id="t24_total">—</div></div>
+        <div class="stat-box"><div class="label">不同 IP</div><div class="num" id="t24_ip">—</div></div>
+        <div class="stat-box"><div class="label">成功</div><div class="num ok" id="t24_ok">—</div></div>
+        <div class="stat-box"><div class="label">失敗</div><div class="num bad" id="t24_fail">—</div></div>
+      </div>
+      <div class="row" style="margin:14px 0 10px">
+        <h3 style="margin:0;font-size:13px;color:#546e7a">最近 7 天</h3>
+      </div>
+      <div class="stat-grid" id="stat_7d">
+        <div class="stat-box"><div class="label">總請求</div><div class="num" id="t7_total">—</div></div>
+        <div class="stat-box"><div class="label">不同 IP</div><div class="num" id="t7_ip">—</div></div>
+        <div class="stat-box"><div class="label">成功</div><div class="num ok" id="t7_ok">—</div></div>
+        <div class="stat-box"><div class="label">失敗</div><div class="num bad" id="t7_fail">—</div></div>
+      </div>
+      <h3 style="margin:14px 0 6px;font-size:13px;color:#546e7a">📌 活躍 IP（過去 7 天 Top 10）</h3>
+      <div class="scroll" style="max-height:200px">
+        <table id="top_ip_table">
+          <thead><tr><th>IP</th><th>國</th><th>總</th><th>成</th><th>敗</th><th>最後</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <button class="ghost" onclick="loadStats()" style="margin-top:10px">重新整理統計</button>
+    </div>
+
+    <div class="card">
+      <h2>📋 活動紀錄</h2>
+      <div class="row" style="gap:6px">
+        <select id="audit_filter" onchange="loadAudit()">
+          <option value="all">全部</option>
+          <option value="ok">僅成功</option>
+          <option value="fail">僅失敗</option>
+        </select>
+        <select id="audit_limit" onchange="loadAudit()">
+          <option value="20">最近 20 筆</option>
+          <option value="50" selected>最近 50 筆</option>
+          <option value="100">最近 100 筆</option>
+          <option value="200">最近 200 筆</option>
+          <option value="500">最近 500 筆</option>
+        </select>
+        <button class="ghost" onclick="loadAudit()">重新整理</button>
+        <button class="danger" onclick="clearAudit()">清空舊紀錄</button>
+      </div>
+      <div class="scroll" style="margin-top:10px">
+        <table id="audit_table">
+          <thead><tr><th>時間</th><th>結果</th><th>IP</th><th>國</th><th>原因</th><th>UA</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -279,6 +462,76 @@ async function login(){
   document.getElementById('login_card').classList.add('hidden');
   document.getElementById('main_card').classList.remove('hidden');
   renderState(r.state);
+  loadStats();
+  loadAudit();
+}
+function fmt(ts){
+  if(!ts) return '—';
+  try{
+    return new Date(ts.replace(' ','T')+'Z').toLocaleString('zh-TW',{hour12:false});
+  }catch{return ts;}
+}
+async function loadStats(){
+  const r = await api('/admin/audit/stats', {admin_pwd: ADM});
+  if (!r.ok) return toast(r.reason || '失敗', true);
+  const a = r.last_24h || {}, b = r.last_7d || {};
+  t24_total.textContent = a.total || 0;
+  t24_ip.textContent = a.uniq_ip || 0;
+  t24_ok.textContent = a.ok_cnt || 0;
+  t24_fail.textContent = a.fail_cnt || 0;
+  t7_total.textContent = b.total || 0;
+  t7_ip.textContent = b.uniq_ip || 0;
+  t7_ok.textContent = b.ok_cnt || 0;
+  t7_fail.textContent = b.fail_cnt || 0;
+  const tb = document.querySelector('#top_ip_table tbody');
+  tb.innerHTML = '';
+  for (const row of (r.top_ips || [])){
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td class="ip">'+(row.ip||'—')+'</td>'+
+                   '<td>'+(row.country||'')+'</td>'+
+                   '<td>'+(row.total||0)+'</td>'+
+                   '<td style="color:#1b5e20">'+(row.ok_cnt||0)+'</td>'+
+                   '<td style="color:#c62828">'+(row.fail_cnt||0)+'</td>'+
+                   '<td class="ts">'+fmt(row.last_seen)+'</td>';
+    tb.appendChild(tr);
+  }
+}
+async function loadAudit(){
+  const filter = document.getElementById('audit_filter').value;
+  const limit = parseInt(document.getElementById('audit_limit').value, 10);
+  const r = await api('/admin/audit', {admin_pwd: ADM, filter, limit});
+  if (!r.ok) return toast(r.reason || '失敗', true);
+  const tb = document.querySelector('#audit_table tbody');
+  tb.innerHTML = '';
+  for (const row of r.rows){
+    const tr = document.createElement('tr');
+    const okPill = row.ok
+      ? '<span class="pill ok">✓</span>'
+      : '<span class="pill bad">✗</span>';
+    const ua = (row.ua || '').replace(/</g,'&lt;');
+    tr.innerHTML = '<td class="ts">'+fmt(row.ts)+'</td>'+
+                   '<td>'+okPill+'</td>'+
+                   '<td class="ip">'+(row.ip||'—')+'</td>'+
+                   '<td>'+(row.country||'')+'</td>'+
+                   '<td>'+(row.reason||'')+'</td>'+
+                   '<td class="ua" title="'+ua+'">'+ua+'</td>';
+    tb.appendChild(tr);
+  }
+  if (!r.rows.length){
+    tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#999;padding:20px">沒有紀錄</td></tr>';
+  }
+}
+async function clearAudit(){
+  const days = prompt('清掉多少天前的紀錄？（輸入數字；輸入 0 全清）', '30');
+  if (days === null) return;
+  const n = parseInt(days, 10);
+  if (isNaN(n) || n < 0) return toast('請輸入有效數字', true);
+  if (!confirm(n === 0 ? '確定全部清光？' : '確定清掉 ' + n + ' 天前的紀錄？')) return;
+  const r = await api('/admin/audit/clear', {admin_pwd: ADM, older_than_days: n});
+  if (!r.ok) return toast(r.reason || '失敗', true);
+  toast(r.msg || '已清');
+  loadStats();
+  loadAudit();
 }
 async function loadState(){
   const r = await api('/admin/state', {admin_pwd: ADM});
