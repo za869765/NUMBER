@@ -10,3 +10,8 @@ __pycache__/
 # 工作快照
 debug/
 log/
+
+# v1.0.38 主密碼嵌入：本機產生，絕對不可進 repo
+_secret.py
+_secret.pyc
+settings.json

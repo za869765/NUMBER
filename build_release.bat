@@ -1,11 +1,20 @@
 @echo off
 REM === HIV 取號 正式版 EXE 編譯流程 ===
-REM 與 build_debug.bat 差別：用 RELEASE.spec（console 隱藏 + 檔名無 _DEBUG）
 chcp 65001 >NUL
 cd /d %~dp0
 
 set "OUT_DIR=D:\Backup\Desktop\CODE\number"
 set "OLD_DIR=%OUT_DIR%\old"
+
+REM v1.0.38：必須先有 _secret.py（主密碼）才能編
+if not exist "_secret.py" (
+  echo.
+  echo X 找不到 _secret.py 主密碼設定檔
+  echo   請先執行 set_master_password.bat 設定主密碼
+  echo.
+  pause
+  exit /b 1
+)
 
 echo [1/4] 確保 %OUT_DIR%\old 存在
 if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"
@@ -17,7 +26,7 @@ for %%F in ("%OUT_DIR%\HIV*.exe") do (
   move /Y "%%F" "%OLD_DIR%\" >NUL
 )
 
-echo [3/4] PyInstaller 編譯（RELEASE 版） → 輸出到 %OUT_DIR%
+echo [3/4] PyInstaller 編譯 → 輸出到 %OUT_DIR%
 "C:\Users\MIHC\AppData\Local\Programs\Python\Python311\python.exe" -m PyInstaller hiv_code_RELEASE.spec --noconfirm --distpath "%OUT_DIR%" --workpath "build"
 if errorlevel 1 (
   echo.

@@ -18,8 +18,8 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.37"
-DEBUG = True  # DEBUG 版：失敗時自動存 HTML 快照、log 詳細
+VERSION = "1.0.38"
+DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # ── v1.0.28：lazy import selenium → 啟動加速 ──
 # 不在 import 階段載入 selenium（拖慢 EXE 冷啟動約 1-2 秒）
@@ -2366,9 +2366,59 @@ class App:
                     col_letter = ws_p.cell(1, col_idx).column_letter
                     ws_p.column_dimensions[col_letter].width = 16
                 ws_p.freeze_panes = "F2"
-            wb.save(self._current_xlsx_path)
+            self._save_xlsx_atomic(wb, self._current_xlsx_path)
         except Exception as e:
             self.log(f"⚠ 寫 Excel 失敗：{e}")
+
+    # ── v1.0.38 原子寫入 + 鎖檔影子檔 ────────────────────
+    def _save_xlsx_atomic(self, wb, target_path):
+        """先寫 .tmp 再 os.replace 到 target；若 target 被開啟（PermissionError）
+        則改寫 _LIVE.xlsx 影子檔（同樣有完整資料）。下次寫主檔成功後
+        會自動清掉影子檔。內容永遠是當下累積結果，重試不會遺失。"""
+        tmp_path = target_path + ".writing.tmp"
+        try:
+            wb.save(tmp_path)
+        except Exception as e:
+            self.log(f"⚠ 寫暫存檔失敗：{e}")
+            return False
+
+        # 嘗試原子換掉主檔
+        try:
+            os.replace(tmp_path, target_path)
+        except PermissionError:
+            # 主檔被開啟，改寫 _LIVE 影子檔
+            stem, ext = os.path.splitext(target_path)
+            live_path = f"{stem}_LIVE{ext}"
+            try:
+                os.replace(tmp_path, live_path)
+                if not getattr(self, "_warned_locked", False):
+                    self.log(
+                        f"⚠ 主檔被開啟中，已寫入影子檔 "
+                        f"{os.path.basename(live_path)}（資料完整、不會遺失）"
+                    )
+                    self.log("   請關閉主檔後，下一筆會自動回寫主檔。")
+                    self._warned_locked = True
+            except Exception as e:
+                self.log(f"⚠ 連影子檔都寫不進去：{e}")
+                # 最後保險：留住 .tmp 不刪
+                return False
+            return False
+        except Exception as e:
+            self.log(f"⚠ 換檔失敗（將下次重試）：{e}")
+            return False
+
+        # 主檔成功 → 清掉之前的影子檔（若存在）
+        stem, ext = os.path.splitext(target_path)
+        live_path = f"{stem}_LIVE{ext}"
+        if os.path.isfile(live_path):
+            try:
+                os.remove(live_path)
+                self.log("✓ 主檔已可寫入，影子檔自動移除")
+            except Exception:
+                pass
+        if getattr(self, "_warned_locked", False):
+            self._warned_locked = False
+        return True
 
     # ── 啟動 ──
     # ── v1.0.21 模式切換 + xlsx 匯入匯出 ──
@@ -3184,45 +3234,44 @@ class App:
             pass
 
 
-# ── v1.0.37 啟動密碼閘 ──────────────────────────────
-# 首次啟動：要求設定密碼（兩次確認），雜湊存進 settings.json
-# 後續啟動：要求輸入密碼，最多 5 次失敗即關閉
-# 忘記密碼 → 刪掉 settings.json 內的 password_hash 欄位即可重設
+# ── v1.0.38 主密碼閘（編譯期嵌入）──────────────────
+# 密碼 hash 來自 _secret.py（gitignore），用 set_master_password.bat 產生。
+# 任何 EXE 只接受編譯時嵌入的那組密碼；
+# 使用者本機跑 .py 時若沒有 _secret.py 會直接拒絕進入。
+# 演算法：PBKDF2-HMAC-SHA256 / 200000 輪 / 16 byte 隨機 salt
+try:
+    from _secret import (
+        MASTER_PASSWORD_HASH,
+        MASTER_PASSWORD_SALT_HEX,
+        PBKDF2_ITERATIONS,
+    )
+except ImportError:
+    MASTER_PASSWORD_HASH = ""
+    MASTER_PASSWORD_SALT_HEX = ""
+    PBKDF2_ITERATIONS = 200000
+
+
 def _hash_password(pw):
-    return hashlib.sha256(pw.encode("utf-8")).hexdigest()
-
-
-def _read_settings_raw():
-    if not os.path.exists(SETTINGS_FILE):
-        return {}
-    try:
-        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _write_settings_raw(d):
-    try:
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-
-def _save_password_hash(hash_str):
-    d = _read_settings_raw()
-    d["password_hash"] = hash_str
-    _write_settings_raw(d)
+    salt = bytes.fromhex(MASTER_PASSWORD_SALT_HEX) if MASTER_PASSWORD_SALT_HEX else b""
+    return hashlib.pbkdf2_hmac(
+        "sha256", pw.encode("utf-8"), salt, PBKDF2_ITERATIONS
+    ).hex()
 
 
 def show_password_gate(parent):
-    """回傳 True=通過、False=取消（呼叫端要 destroy root）"""
-    saved = _read_settings_raw().get("password_hash")
-    is_first = not saved
+    """v1.0.38：對 _secret.MASTER_PASSWORD_HASH 比對；最多 5 次失敗。
+    回傳 True=通過、False=取消／失敗上限。"""
+    if not MASTER_PASSWORD_HASH or not MASTER_PASSWORD_SALT_HEX:
+        messagebox.showerror(
+            "未設定主密碼",
+            "本程式未嵌入主密碼。\n\n"
+            "請先在程式碼資料夾跑 set_master_password.bat\n"
+            "產生 _secret.py 後重新編譯。",
+        )
+        return False
 
     dlg = tk.Toplevel(parent)
-    dlg.title("HIV 取號工具 — 首次啟動，請設定密碼" if is_first else "HIV 取號工具 — 登入")
+    dlg.title("HIV 取號工具 — 登入")
     dlg.resizable(False, False)
     dlg.transient(parent)
     dlg.grab_set()
@@ -3235,99 +3284,49 @@ def show_password_gate(parent):
     frm = tk.Frame(dlg, padx=24, pady=18, bg="#eef5fa")
     frm.pack(fill="both", expand=True)
 
-    if is_first:
-        tk.Label(frm, text="🔐 首次啟動：請設定登入密碼",
-                 font=("Microsoft JhengHei", 12, "bold"),
-                 bg="#eef5fa", fg="#1565c0").pack(anchor="w")
-        tk.Label(frm, text="（密碼以 SHA-256 雜湊保存於 settings.json，至少 4 個字）",
-                 font=("Microsoft JhengHei", 9),
-                 bg="#eef5fa", fg="#666").pack(anchor="w", pady=(2, 12))
-        tk.Label(frm, text="新密碼：", bg="#eef5fa",
-                 font=("Microsoft JhengHei", 10)).pack(anchor="w")
-        e1 = tk.Entry(frm, show="*", width=32, font=("Microsoft JhengHei", 11))
-        e1.pack(anchor="w", pady=(2, 8))
-        tk.Label(frm, text="再次確認：", bg="#eef5fa",
-                 font=("Microsoft JhengHei", 10)).pack(anchor="w")
-        e2 = tk.Entry(frm, show="*", width=32, font=("Microsoft JhengHei", 11))
-        e2.pack(anchor="w", pady=(2, 4))
-        msg = tk.Label(frm, text="", fg="#c62828", bg="#eef5fa",
-                       font=("Microsoft JhengHei", 9))
-        msg.pack(anchor="w", pady=(4, 0))
+    tk.Label(frm, text="🔐 HIV 匿名諮詢代碼批次取號工具",
+             font=("Microsoft JhengHei", 13, "bold"),
+             bg="#eef5fa", fg="#1565c0").pack(anchor="w")
+    tk.Label(frm, text="請輸入主密碼以使用此工具",
+             font=("Microsoft JhengHei", 9),
+             bg="#eef5fa", fg="#666").pack(anchor="w", pady=(2, 14))
+    tk.Label(frm, text="密碼：", bg="#eef5fa",
+             font=("Microsoft JhengHei", 10)).pack(anchor="w")
+    e1 = tk.Entry(frm, show="*", width=32, font=("Microsoft JhengHei", 11))
+    e1.pack(anchor="w", pady=(2, 4))
+    msg = tk.Label(frm, text="", fg="#c62828", bg="#eef5fa",
+                   font=("Microsoft JhengHei", 9))
+    msg.pack(anchor="w", pady=(4, 0))
 
-        def do_set():
-            p1 = e1.get()
-            p2 = e2.get()
-            if not p1:
-                msg.config(text="✗ 密碼不可空白")
-                return
-            if len(p1) < 4:
-                msg.config(text="✗ 密碼至少 4 個字")
-                return
-            if p1 != p2:
-                msg.config(text="✗ 兩次輸入不一致")
-                e2.delete(0, tk.END)
-                e2.focus()
-                return
-            _save_password_hash(_hash_password(p1))
+    def do_login():
+        p = e1.get()
+        if _hash_password(p) == MASTER_PASSWORD_HASH:
             result["ok"] = True
             dlg.destroy()
+            return
+        attempts["count"] += 1
+        left = MAX_ATTEMPTS - attempts["count"]
+        if left <= 0:
+            msg.config(text="✗ 已達失敗上限，程式即將關閉")
+            e1.config(state="disabled")
+            dlg.after(1500, dlg.destroy)
+        else:
+            msg.config(text=f"✗ 密碼錯誤（剩 {left} 次）")
+            e1.delete(0, tk.END)
+            e1.focus()
 
-        btnf = tk.Frame(frm, bg="#eef5fa")
-        btnf.pack(anchor="e", pady=(14, 0))
-        tk.Button(btnf, text="設定密碼", width=10, command=do_set,
-                  bg="#1565c0", fg="white",
-                  font=("Microsoft JhengHei", 10, "bold"),
-                  relief="flat", padx=8, pady=4).pack(side="left", padx=4)
-        tk.Button(btnf, text="取消", width=8, command=dlg.destroy,
-                  font=("Microsoft JhengHei", 10),
-                  relief="flat", padx=8, pady=4).pack(side="left")
-        e1.focus()
-        dlg.bind("<Return>", lambda e: do_set())
-    else:
-        tk.Label(frm, text="🔐 HIV 匿名諮詢代碼批次取號工具",
-                 font=("Microsoft JhengHei", 13, "bold"),
-                 bg="#eef5fa", fg="#1565c0").pack(anchor="w")
-        tk.Label(frm, text="請輸入登入密碼以使用此工具",
-                 font=("Microsoft JhengHei", 9),
-                 bg="#eef5fa", fg="#666").pack(anchor="w", pady=(2, 14))
-        tk.Label(frm, text="密碼：", bg="#eef5fa",
-                 font=("Microsoft JhengHei", 10)).pack(anchor="w")
-        e1 = tk.Entry(frm, show="*", width=32, font=("Microsoft JhengHei", 11))
-        e1.pack(anchor="w", pady=(2, 4))
-        msg = tk.Label(frm, text="", fg="#c62828", bg="#eef5fa",
-                       font=("Microsoft JhengHei", 9))
-        msg.pack(anchor="w", pady=(4, 0))
+    btnf = tk.Frame(frm, bg="#eef5fa")
+    btnf.pack(anchor="e", pady=(14, 0))
+    tk.Button(btnf, text="登入", width=10, command=do_login,
+              bg="#1565c0", fg="white",
+              font=("Microsoft JhengHei", 10, "bold"),
+              relief="flat", padx=8, pady=4).pack(side="left", padx=4)
+    tk.Button(btnf, text="取消", width=8, command=dlg.destroy,
+              font=("Microsoft JhengHei", 10),
+              relief="flat", padx=8, pady=4).pack(side="left")
+    e1.focus()
+    dlg.bind("<Return>", lambda e: do_login())
 
-        def do_login():
-            p = e1.get()
-            if _hash_password(p) == saved:
-                result["ok"] = True
-                dlg.destroy()
-                return
-            attempts["count"] += 1
-            left = MAX_ATTEMPTS - attempts["count"]
-            if left <= 0:
-                msg.config(text="✗ 已達失敗上限，程式即將關閉")
-                e1.config(state="disabled")
-                dlg.after(1500, dlg.destroy)
-            else:
-                msg.config(text=f"✗ 密碼錯誤（剩 {left} 次）")
-                e1.delete(0, tk.END)
-                e1.focus()
-
-        btnf = tk.Frame(frm, bg="#eef5fa")
-        btnf.pack(anchor="e", pady=(14, 0))
-        tk.Button(btnf, text="登入", width=10, command=do_login,
-                  bg="#1565c0", fg="white",
-                  font=("Microsoft JhengHei", 10, "bold"),
-                  relief="flat", padx=8, pady=4).pack(side="left", padx=4)
-        tk.Button(btnf, text="取消", width=8, command=dlg.destroy,
-                  font=("Microsoft JhengHei", 10),
-                  relief="flat", padx=8, pady=4).pack(side="left")
-        e1.focus()
-        dlg.bind("<Return>", lambda e: do_login())
-
-    # 居中（grab_set 後再算大小）
     dlg.update_idletasks()
     w = dlg.winfo_reqwidth()
     h = dlg.winfo_reqheight()
@@ -3342,13 +3341,12 @@ def show_password_gate(parent):
 def main():
     log_path = init_logfile()
     root = tk.Tk()
-    root.withdraw()  # v1.0.37 先藏起來，密碼通過才顯示
+    root.withdraw()  # 主視窗先藏，密碼通過才顯示
     try:
         root.iconbitmap(default="")
     except Exception:
         pass
 
-    # v1.0.37 啟動密碼閘
     if not show_password_gate(root):
         root.destroy()
         sys.exit(0)
