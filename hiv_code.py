@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.39"
+VERSION = "1.0.40"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -472,11 +472,22 @@ class CanvasProgressBar(tk.Canvas):
         self.itemconfigure(self.bar, fill=fg)
 
 # ── 工具函式 ──────────────────────────────────────
+def _hide_dir(path):
+    """v1.0.40：把 Windows 資料夾標 HIDDEN 屬性，工作資料夾不要長一堆礙眼"""
+    try:
+        import ctypes
+        FILE_ATTRIBUTE_HIDDEN = 0x02
+        ctypes.windll.kernel32.SetFileAttributesW(str(path), FILE_ATTRIBUTE_HIDDEN)
+    except Exception:
+        pass
+
+
 def ensure_outdir():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(os.path.join(OUTPUT_DIR, "old"), exist_ok=True)
-    os.makedirs(os.path.join(OUTPUT_DIR, "log"), exist_ok=True)
-    os.makedirs(os.path.join(OUTPUT_DIR, "debug"), exist_ok=True)
+    for sub in ("old", "log", "debug"):
+        p = os.path.join(OUTPUT_DIR, sub)
+        os.makedirs(p, exist_ok=True)
+        _hide_dir(p)
 
 # ── 全域 log file（每次啟動 GUI 開新檔） ──
 _LOG_FP = None
@@ -3274,11 +3285,12 @@ def cloud_verify(password):
 
 
 def show_password_gate(parent):
-    """v1.0.39 每次啟動連線雲端驗證；無離線寬限。"""
+    """v1.0.39 每次啟動連線雲端驗證；無離線寬限。
+    v1.0.40 修：parent 是 withdraw 過的，不能用 transient 否則視窗藏起來看不到。"""
     dlg = tk.Toplevel(parent)
     dlg.title("HIV 取號工具 — 登入")
     dlg.resizable(False, False)
-    dlg.transient(parent)
+    # 不用 transient，避免被 hidden parent 影響顯示
     dlg.grab_set()
     dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
 
@@ -3353,31 +3365,73 @@ def show_password_gate(parent):
     sh = dlg.winfo_screenheight()
     dlg.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
 
+    # v1.0.40 強制把視窗推到最前面（避免被其他視窗蓋住或在背景看不見）
+    dlg.deiconify()
+    dlg.lift()
+    dlg.attributes("-topmost", True)
+    dlg.after(300, lambda: dlg.attributes("-topmost", False))
+    dlg.focus_force()
+    e1.focus_set()
+
     parent.wait_window(dlg)
     return result["ok"]
 
 
-def main():
-    log_path = init_logfile()
-    root = tk.Tk()
-    root.withdraw()  # 主視窗先藏，密碼通過才顯示
+def _crash_log(exc_text):
+    """v1.0.40：把 fatal error 寫到 EXE 旁邊的 crash_*.txt，方便除錯"""
     try:
-        root.iconbitmap(default="")
+        base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+               else os.path.dirname(os.path.abspath(__file__))
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        p = os.path.join(base, f"crash_{ts}.txt")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(f"VERSION {VERSION}\n")
+            f.write(f"sys.executable: {sys.executable}\n")
+            f.write(f"OUTPUT_DIR: {OUTPUT_DIR}\n")
+            f.write(f"CLOUD_AUTH_URL: {CLOUD_AUTH_URL}\n")
+            f.write("=" * 50 + "\n")
+            f.write(exc_text)
+        return p
     except Exception:
-        pass
+        return None
 
-    if not show_password_gate(root):
-        root.destroy()
-        sys.exit(0)
 
-    root.deiconify()
-    app = App(root)
-    app._update_counts()
-    app.log(f"📁 log 寫入：{log_path}")
-    app.log(f"📁 輸出資料夾：{OUTPUT_DIR}")
-    app.log(f"   舊版自動歸檔：{os.path.join(OUTPUT_DIR, 'old')}")
-    app.log(f"   失敗快照：{os.path.join(OUTPUT_DIR, 'debug')}")
-    root.mainloop()
+def main():
+    try:
+        log_path = init_logfile()
+        root = tk.Tk()
+        root.withdraw()  # 主視窗先藏，密碼通過才顯示
+        try:
+            root.iconbitmap(default="")
+        except Exception:
+            pass
+
+        if not show_password_gate(root):
+            root.destroy()
+            sys.exit(0)
+
+        root.deiconify()
+        app = App(root)
+        app._update_counts()
+        app.log(f"📁 log 寫入：{log_path}")
+        app.log(f"📁 輸出資料夾：{OUTPUT_DIR}")
+        app.log(f"   舊版自動歸檔：{os.path.join(OUTPUT_DIR, 'old')}")
+        app.log(f"   失敗快照：{os.path.join(OUTPUT_DIR, 'debug')}")
+        root.mainloop()
+    except SystemExit:
+        raise
+    except Exception:
+        import traceback
+        text = traceback.format_exc()
+        crash_path = _crash_log(text)
+        try:
+            messagebox.showerror(
+                "HIV 取號工具 — 啟動失敗",
+                f"程式啟動時發生例外。\n\nlog 寫到：\n{crash_path or '（寫入失敗）'}\n\n"
+                f"錯誤摘要：\n{text[-400:]}",
+            )
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
