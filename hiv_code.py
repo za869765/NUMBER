@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.60"
+VERSION = "1.0.61"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -4189,7 +4189,10 @@ def show_password_gate(parent):
     e1.focus()
     dlg.bind("<Return>", lambda e: do_login() if not update_state["required"] else _do_force_update())
 
-    # v1.0.58 啟動時背景查 /version，偵測到新版 → 切強制更新模式
+    # v1.0.58/61 啟動時背景查 /version；watchdog 5 秒強制超時
+    # done flag 防止 thread 與 watchdog 同時更新 UI 造成競態
+    check_state = {"done": False}
+
     def _async_check_version():
         import urllib.request
         try:
@@ -4197,8 +4200,16 @@ def show_password_gate(parent):
                 CLOUD_AUTH_URL.rstrip("/") + "/version",
                 headers={"User-Agent": f"HIV-Auth-Client/{VERSION} (Windows)"},
             )
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+            # v1.0.61：用 socket-level timeout 才確實會中斷（urllib 內部 readtimeout 有時不準）
+            import socket
+            socket.setdefaulttimeout(3)
+            try:
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            finally:
+                socket.setdefaulttimeout(None)
+            if check_state["done"]: return  # 已被 watchdog 接管
+            check_state["done"] = True
             if not data.get("ok"):
                 dlg.after(0, lambda: latest_var.set("雲端版本：尚未上傳"))
                 return
@@ -4212,7 +4223,6 @@ def show_password_gate(parent):
                 latest_lbl.config(fg="#c62828", font=("Consolas", 10, "bold"))
                 msg.config(text=f"⚠ 偵測到新版 v{latest}（你目前 v{VERSION}），必須先更新才能繼續使用。",
                            fg="#c62828")
-                # 鎖密碼框、把按鈕變「立即更新」
                 e1.config(state="disabled")
                 update_state["required"] = True
                 update_state["latest"] = latest
@@ -4232,11 +4242,20 @@ def show_password_gate(parent):
                 dlg.after(0, _apply_update_required)
             else:
                 dlg.after(0, _apply_latest)
-        except Exception:
-            # 連不上就不阻擋登入（離線寬限）
-            dlg.after(0, lambda: latest_var.set("雲端版本：— （無法連線）"))
+        except Exception as e:
+            if check_state["done"]: return
+            check_state["done"] = True
+            err_msg = str(e)[:40]
+            dlg.after(0, lambda m=err_msg: latest_var.set(f"雲端版本：— （連線失敗）"))
+
+    def _watchdog():
+        if not check_state["done"]:
+            check_state["done"] = True
+            try: latest_var.set("雲端版本：— （超時 5 秒）")
+            except Exception: pass
 
     threading.Thread(target=_async_check_version, daemon=True).start()
+    dlg.after(5000, _watchdog)  # v1.0.61：5 秒 hard timeout 確保 UI 一定更新
 
     dlg.update_idletasks()
     w = dlg.winfo_reqwidth()

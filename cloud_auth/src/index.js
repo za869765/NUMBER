@@ -297,6 +297,8 @@ async function handleAdminStats(request, env) {
   if (!(await checkAdmin(body.admin_pwd, env))) {
     return jsonReply({ ok: false, reason: '管理員密碼錯誤' }, 401);
   }
+  // v1.0.61：admin stats 加 no-store 避免 Cloudflare 邊緣快取
+  const headers = { ...JSON_HDR, 'Cache-Control': 'no-store, no-cache, must-revalidate' };
   const stats = {};
   // 24h（v1.0.56：uniq_machine = 不同 hostname；uniq_ip 保留作備援）
   const r24 = await env.DB.prepare(
@@ -348,17 +350,24 @@ async function handleAdminStats(request, env) {
      FROM audit WHERE ts >= datetime('now', '-7 days')
      GROUP BY ip ORDER BY total DESC LIMIT 10`
   ).all();
-  return jsonReply({
+  // v1.0.61：top hostnames（給 admin UI 「已使用電腦數」tooltip 用）
+  const topHosts = await env.DB.prepare(
+    `SELECT hostname, MAX(ts) AS last_seen, COUNT(*) AS total
+     FROM audit
+     WHERE hostname != '' AND hostname IS NOT NULL
+     GROUP BY hostname
+     ORDER BY MAX(ts) DESC LIMIT 8`
+  ).all();
+  return new Response(JSON.stringify({
     ok: true,
     last_24h: r24 || {},
     last_7d: r7 || {},
     top_ips: topIps.results || [],
-    // v1.0.58 新增
+    top_hostnames: topHosts.results || [],  // v1.0.61
     machines_all: (rAll && rAll.uniq_machine_all) || 0,
     error_reports_7d: err7,
-    // v1.0.59 新增：今日精確產生代碼總數（從 batches）
     today_codes: todayCodes,
-  });
+  }), { headers });
 }
 
 // ── 管理員：每日統計（長條圖用）──────────────
@@ -1435,7 +1444,7 @@ const ADMIN_HTML = `<!doctype html>
         <div class="page-meta">
           最近更新 <span id="s_at">—</span>
           <span class="sep">·</span>
-          <button class="btn ghost sm" onclick="loadState()">重新整理</button>
+          <button class="btn ghost sm" onclick="reloadAll()">重新整理</button>
         </div>
       </div>
 
@@ -2359,6 +2368,23 @@ async function loadState(){
   renderState(r.state);
 }
 
+// v1.0.61：頂部「重新整理」按鈕統一刷新 state + overview + 已展開的其他 section
+async function reloadAll(){
+  await loadState();
+  await loadOverview();
+  // 已展開的 section 也順手重抓
+  const isOpen = (id) => {
+    const el = document.getElementById(id);
+    return el && !el.classList.contains('collapsed');
+  };
+  if (isOpen('sec-machines') && typeof loadMachines === 'function') loadMachines();
+  if (isOpen('sec-usage')) loadDaily(true);
+  if (isOpen('sec-audit')) loadAudit();
+  if (isOpen('sec-errors') && typeof loadErrors === 'function') loadErrors();
+  toast('已重新整理', 'ok');
+}
+window.reloadAll = reloadAll;
+
 let _pwdShown = { pwd: false, admin: false };
 let _curState = {};
 
@@ -2573,21 +2599,27 @@ async function loadOverview(){
       setTitle('cell_today',
         '24 小時內登入嘗試明細\\n' +
         '─────────────────\\n' +
-        '成功    ' + (r24.ok_cnt || 0) + '\\n' +
-        '失敗    ' + (r24.fail_cnt || 0) + '\\n' +
-        '不同 IP ' + (r24.uniq_ip || 0) + '\\n' +
-        '不同電腦 ' + (r24.uniq_machine || 0));
+        '成功     ' + (r24.ok_cnt || 0) + '\\n' +
+        '失敗     ' + (r24.fail_cnt || 0) + '\\n' +
+        '使用 IP 數    ' + (r24.uniq_ip || 0) + '\\n' +
+        '使用電腦數   ' + (r24.uniq_machine || 0));
       setTitle('cell_today_ok',
-        '24 小時內所有 EXE 上報的精確代碼產出總數\\n' +
+        '24 小時內所有 EXE 批次完成累計產生的諮詢代碼總數\\n' +
         '─────────────────\\n' +
-        '由 EXE 批次結束時上報 /report-batch 累計\\n' +
-        '至「電腦清單」分頁可看每台累計');
+        '由 EXE 批次結束時上報 /report-batch 累加\\n' +
+        '至「電腦清單」分頁可看每台累計與最後批次時間');
       setTitle('cell_err_7d',
         '7 天 error_reports 累計\\n' +
         'EXE 偵測紅色錯誤 log 自動上傳，至「錯誤回報」分頁看完整內容');
+      // v1.0.61：「已使用電腦數」 tooltip 顯示電腦清單（最多 8 台）
+      const hostList = (s.top_hostnames || [])
+        .map(function(h){ return '  • ' + (h.hostname || '?'); })
+        .join('\\n');
       setTitle('cell_machines',
-        '累計不同 hostname 數（不限時間）\\n' +
-        '至「電腦清單」分頁看每台明細');
+        '累計使用過的電腦數（不限時間）\\n' +
+        '─────────────────\\n' +
+        (hostList || '（尚無資料）') + '\\n' +
+        '\\n至「電腦清單」分頁看每台明細');
     }
   } catch {}
   // v1.0.57：拉最新 EXE 版本資訊
