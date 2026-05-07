@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.45"
+VERSION = "1.0.46"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -3373,7 +3373,7 @@ def show_password_gate(parent):
     """v1.0.39 每次啟動連線雲端驗證；無離線寬限。
     v1.0.40 修：parent 是 withdraw 過的，不能用 transient 否則視窗藏起來看不到。"""
     dlg = tk.Toplevel(parent)
-    dlg.title("HIV 取號工具 — 登入")
+    dlg.title("諮詢代碼取號小工具－登入")
     dlg.resizable(False, False)
     # 不用 transient，避免被 hidden parent 影響顯示
     dlg.grab_set()
@@ -3384,10 +3384,10 @@ def show_password_gate(parent):
     frm = tk.Frame(dlg, padx=24, pady=18, bg="#eef5fa")
     frm.pack(fill="both", expand=True)
 
-    tk.Label(frm, text="🔐 HIV 匿名諮詢代碼批次取號工具",
+    tk.Label(frm, text="🔐 諮詢代碼取號小工具",
              font=("Microsoft JhengHei", 13, "bold"),
              bg="#eef5fa", fg="#1565c0").pack(anchor="w")
-    tk.Label(frm, text="連線雲端驗證主密碼（需網路）",
+    tk.Label(frm, text="請入授權密碼",
              font=("Microsoft JhengHei", 9),
              bg="#eef5fa", fg="#666").pack(anchor="w", pady=(2, 14))
     tk.Label(frm, text="密碼：", bg="#eef5fa",
