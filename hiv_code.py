@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.61"
+VERSION = "1.0.62"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -4189,73 +4189,82 @@ def show_password_gate(parent):
     e1.focus()
     dlg.bind("<Return>", lambda e: do_login() if not update_state["required"] else _do_force_update())
 
-    # v1.0.58/61 啟動時背景查 /version；watchdog 5 秒強制超時
-    # done flag 防止 thread 與 watchdog 同時更新 UI 造成競態
-    check_state = {"done": False}
+    # v1.0.62 重寫：用「每秒輪詢」+「倒數顯示」確保 UI 一定看得到進度
+    # 背景 thread 把 result 寫到 check_state，主 thread 每秒 poll 一次顯示倒數
+    # 5 秒到還沒拿到結果 → 強制 timeout
+    check_state = {"done": False, "elapsed": 0, "result": None}
 
     def _async_check_version():
-        import urllib.request
+        import urllib.request, socket
+        socket.setdefaulttimeout(3)
         try:
             req = urllib.request.Request(
                 CLOUD_AUTH_URL.rstrip("/") + "/version",
                 headers={"User-Agent": f"HIV-Auth-Client/{VERSION} (Windows)"},
             )
-            # v1.0.61：用 socket-level timeout 才確實會中斷（urllib 內部 readtimeout 有時不準）
-            import socket
-            socket.setdefaulttimeout(3)
-            try:
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-            finally:
-                socket.setdefaulttimeout(None)
-            if check_state["done"]: return  # 已被 watchdog 接管
-            check_state["done"] = True
-            if not data.get("ok"):
-                dlg.after(0, lambda: latest_var.set("雲端版本：尚未上傳"))
-                return
-            latest = (data.get("latest") or "").strip()
-            if not latest:
-                return
-            cmp_ = _semver_compare(latest, VERSION)
-
-            def _apply_update_required():
-                latest_var.set(f"雲端版本：v{latest}  ⚠ 必須更新")
-                latest_lbl.config(fg="#c62828", font=("Consolas", 10, "bold"))
-                msg.config(text=f"⚠ 偵測到新版 v{latest}（你目前 v{VERSION}），必須先更新才能繼續使用。",
-                           fg="#c62828")
-                e1.config(state="disabled")
-                update_state["required"] = True
-                update_state["latest"] = latest
-                update_state["filename"] = data.get("filename")
-                durl = data.get("download_url") or "/exe-download"
-                if not durl.startswith("http"):
-                    durl = CLOUD_AUTH_URL.rstrip("/") + durl
-                update_state["url"] = durl
-                btn_login.config(text="立即更新", command=_do_force_update,
-                                  bg="#c62828", activebackground="#8b0000")
-
-            def _apply_latest():
-                latest_var.set(f"雲端版本：v{latest}  ✓ 已是最新")
-                latest_lbl.config(fg="#2e7d32")
-
-            if cmp_ > 0:
-                dlg.after(0, _apply_update_required)
-            else:
-                dlg.after(0, _apply_latest)
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            check_state["result"] = ("ok", data)
         except Exception as e:
-            if check_state["done"]: return
-            check_state["done"] = True
-            err_msg = str(e)[:40]
-            dlg.after(0, lambda m=err_msg: latest_var.set(f"雲端版本：— （連線失敗）"))
-
-    def _watchdog():
-        if not check_state["done"]:
-            check_state["done"] = True
-            try: latest_var.set("雲端版本：— （超時 5 秒）")
+            check_state["result"] = ("error", str(e)[:60])
+        finally:
+            try: socket.setdefaulttimeout(None)
             except Exception: pass
 
+    def _apply_data(data):
+        if not data.get("ok"):
+            latest_var.set("雲端版本：尚未上傳")
+            return
+        latest = (data.get("latest") or "").strip()
+        if not latest:
+            latest_var.set("雲端版本：— （無回應）")
+            return
+        cmp_ = _semver_compare(latest, VERSION)
+        if cmp_ > 0:
+            # 強制更新模式
+            latest_var.set(f"雲端版本：v{latest}  ⚠ 必須更新")
+            latest_lbl.config(fg="#c62828", font=("Consolas", 10, "bold"))
+            msg.config(text=f"⚠ 偵測到新版 v{latest}（你目前 v{VERSION}），必須先更新才能繼續使用。",
+                       fg="#c62828")
+            e1.config(state="disabled")
+            update_state["required"] = True
+            update_state["latest"] = latest
+            update_state["filename"] = data.get("filename")
+            durl = data.get("download_url") or "/exe-download"
+            if not durl.startswith("http"):
+                durl = CLOUD_AUTH_URL.rstrip("/") + durl
+            update_state["url"] = durl
+            btn_login.config(text="立即更新", command=_do_force_update,
+                              bg="#c62828", activebackground="#8b0000")
+        else:
+            latest_var.set(f"雲端版本：v{latest}  ✓ 已是最新")
+            latest_lbl.config(fg="#2e7d32")
+
+    def _poll():
+        if check_state["done"]:
+            return
+        # 結果到了就立刻處理（無論還剩幾秒）
+        if check_state["result"] is not None:
+            check_state["done"] = True
+            kind, val = check_state["result"]
+            if kind == "ok":
+                try: _apply_data(val)
+                except Exception: latest_var.set("雲端版本：— （解析錯誤）")
+            else:
+                latest_var.set("雲端版本：— （連線失敗）")
+            return
+        # 倒數
+        check_state["elapsed"] += 1
+        if check_state["elapsed"] >= 5:
+            check_state["done"] = True
+            latest_var.set("雲端版本：— （超時 5 秒）")
+            return
+        latest_var.set(f"雲端版本：檢查中… ({check_state['elapsed']}s/5s)")
+        try: dlg.after(1000, _poll)
+        except Exception: pass
+
     threading.Thread(target=_async_check_version, daemon=True).start()
-    dlg.after(5000, _watchdog)  # v1.0.61：5 秒 hard timeout 確保 UI 一定更新
+    dlg.after(1000, _poll)  # 1 秒後第一次輪詢
 
     dlg.update_idletasks()
     w = dlg.winfo_reqwidth()
@@ -4295,6 +4304,58 @@ def _crash_log(exc_text):
         return None
 
 
+def _archive_older_exes(log_callback=None):
+    """v1.0.62：啟動時掃同層的 HIV*.exe，比自己舊的搬到 old/
+    自動更新後使用者下次跑新 EXE 啟動，舊版就被歸檔；不再留在桌面礙眼"""
+    if not getattr(sys, "frozen", False):
+        return  # 開發 .py 模式跳過
+    import re, shutil
+    exe_dir = os.path.dirname(sys.executable)
+    self_path = os.path.abspath(sys.executable)
+    old_dir = os.path.join(exe_dir, "old")
+    try:
+        os.makedirs(old_dir, exist_ok=True)
+        _hide_path(old_dir)
+    except Exception:
+        pass
+
+    pattern = re.compile(r'_v(\d+)\.(\d+)\.(\d+)\.exe$', re.IGNORECASE)
+    moved = []
+    try:
+        for fname in os.listdir(exe_dir):
+            full = os.path.join(exe_dir, fname)
+            if not os.path.isfile(full):
+                continue
+            if os.path.abspath(full) == self_path:
+                continue  # 自己跳過
+            if not fname.lower().endswith(".exe"):
+                continue
+            if not fname.startswith("HIV"):
+                continue
+            m = pattern.search(fname)
+            if not m:
+                continue
+            ver = f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
+            if _semver_compare(ver, VERSION) >= 0:
+                continue  # 同版本或更新（保留）
+            try:
+                target = os.path.join(old_dir, fname)
+                if os.path.exists(target):
+                    stem, ext = os.path.splitext(fname)
+                    target = os.path.join(old_dir,
+                        f"{stem}_{datetime.datetime.now().strftime('%H%M%S')}{ext}")
+                shutil.move(full, target)
+                moved.append((fname, ver))
+            except Exception:
+                pass  # 檔案被鎖等問題，下次再試
+    except Exception:
+        return
+    if log_callback:
+        for fname, ver in moved:
+            try: log_callback(f"📦 舊版 v{ver} 已歸檔 → old\\{fname}")
+            except Exception: pass
+
+
 def main():
     try:
         log_path = init_logfile()
@@ -4314,7 +4375,10 @@ def main():
         app._update_counts()
         app.log(f"📁 log 寫入：{log_path}")
         app.log(f"📁 輸出資料夾：{OUTPUT_DIR}")
-        # v1.0.60：拿掉「舊版自動歸檔」「失敗快照」兩行 log（使用者沒在用、佔版面）
+
+        # v1.0.62：啟動時把同層比自己舊的 HIV*.exe 搬到 old/（自動更新後清乾淨）
+        try: _archive_older_exes(app.log)
+        except Exception: pass
 
         # v1.0.55：背景檢查更新（thread-safe log 透過 root.after 切回主執行緒）
         def _safe_log(msg):
