@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.53"
+VERSION = "1.0.54"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -2473,9 +2473,11 @@ class App:
             except Exception: pass
 
     def _maybe_report_error(self, trigger_msg):
-        """v1.0.53：紅色 error log 觸發 → 把 log_box 內容打包 POST 到
-        cloud_auth /report-error，由 Worker 存進 D1（並可選擇寄 email）。
-        每 session 只發一次，避免錯誤連環觸發大量上報。"""
+        """v1.0.53/54：紅色 error log 觸發 → 把 log_box 內容打包 POST 到
+        cloud_auth /report-error，由 Worker 存進 D1（並可選擇寄 email/Telegram）。
+        v1.0.54 加機器識別資訊（hostname/win_user/mac/os_ver）。
+        每 session 只發一次，避免錯誤連環觸發大量上報。
+        靜默操作，不顯示任何 UI 彈窗。"""
         if getattr(self, "_error_reported", False):
             return
         self._error_reported = True
@@ -2483,9 +2485,29 @@ class App:
             log_text = self.log_box.get("1.0", "end")
         except Exception:
             log_text = trigger_msg or ""
-        # 截最後 60KB（最近的訊息較重要；Worker 端再額外保險到 100KB）
         if len(log_text) > 60000:
             log_text = log_text[-60000:]
+
+        # v1.0.54 機器識別資訊
+        import socket, uuid
+        try:
+            hostname = socket.gethostname() or ""
+        except Exception:
+            hostname = ""
+        try:
+            win_user = (os.environ.get("USERNAME") or os.environ.get("USER") or "")
+        except Exception:
+            win_user = ""
+        try:
+            mac_int = uuid.getnode()
+            mac = ":".join(f"{(mac_int >> i) & 0xff:02x}" for i in (40, 32, 24, 16, 8, 0))
+        except Exception:
+            mac = ""
+        try:
+            v = sys.getwindowsversion()
+            os_ver = f"Windows {v.major}.{v.minor}.{v.build}"
+        except Exception:
+            os_ver = ""
 
         def _bg():
             import urllib.request, urllib.error
@@ -2494,6 +2516,10 @@ class App:
                     "version": VERSION,
                     "trigger": (trigger_msg or "")[:200],
                     "log_text": log_text,
+                    "hostname": hostname[:64],
+                    "win_user": win_user[:64],
+                    "mac": mac[:32],
+                    "os_ver": os_ver[:64],
                 }).encode("utf-8")
                 req = urllib.request.Request(
                     CLOUD_AUTH_URL.rstrip("/") + "/report-error",
@@ -2507,7 +2533,7 @@ class App:
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     resp.read()
             except Exception:
-                pass  # 上報失敗不影響主流程
+                pass  # 靜默：上報失敗不影響主流程也不通知使用者
         threading.Thread(target=_bg, daemon=True).start()
 
     @staticmethod

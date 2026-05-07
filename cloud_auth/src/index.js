@@ -376,44 +376,24 @@ async function handleReportError(request, env) {
   const country = (request.cf && request.cf.country) ||
                    request.headers.get('cf-ipcountry') || '';
   const ts = new Date().toISOString();
+  // v1.0.54 機器識別欄位
+  const hostname = String((body && body.hostname) || '').slice(0, 64);
+  const win_user = String((body && body.win_user) || '').slice(0, 64);
+  const mac = String((body && body.mac) || '').slice(0, 32);
+  const os_ver = String((body && body.os_ver) || '').slice(0, 64);
 
   try {
     await env.DB.prepare(
-      `INSERT INTO error_reports (ts, ip, country, ua, version, trigger, log_text)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`
-    ).bind(ts, ip, country, ua, version, trigger, log_text).run();
+      `INSERT INTO error_reports
+        (ts, ip, country, ua, version, trigger, log_text, hostname, win_user, mac, os_ver)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
+    ).bind(ts, ip, country, ua, version, trigger, log_text,
+            hostname, win_user, mac, os_ver).run();
   } catch (e) {
     return jsonReply({ ok: false, reason: '儲存失敗' }, 500);
   }
-
-  // 寄 email（若有設 RESEND_API_KEY 與 ALERT_EMAIL）
-  let emailed = false;
-  if (env.RESEND_API_KEY) {
-    const to = env.ALERT_EMAIL || 'za869765@gmail.com';
-    try {
-      const resp = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer ' + env.RESEND_API_KEY,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from: 'onboarding@resend.dev',
-          to,
-          subject: '[諮詢代碼工具] 錯誤回報 v' + version,
-          text:
-            '時間: ' + ts + '\n' +
-            'IP: ' + ip + ' (' + country + ')\n' +
-            '版本: ' + version + '\n' +
-            'UA: ' + ua + '\n' +
-            '觸發訊息:\n' + trigger + '\n\n' +
-            '=== Log（最後 100KB） ===\n' + log_text,
-        }),
-      });
-      emailed = resp.ok;
-    } catch {}
-  }
-  return jsonReply({ ok: true, emailed });
+  // v1.0.54：使用者要求只存 D1 + admin UI 顯示，不寄 email
+  return jsonReply({ ok: true });
 }
 
 async function handleAdminErrorReports(request, env) {
@@ -423,7 +403,8 @@ async function handleAdminErrorReports(request, env) {
   }
   const limit = Math.min(200, Math.max(10, parseInt(body.limit, 10) || 50));
   const r = await env.DB.prepare(
-    `SELECT id, ts, ip, country, ua, version, trigger, log_text
+    `SELECT id, ts, ip, country, ua, version, trigger, log_text,
+            hostname, win_user, mac, os_ver
      FROM error_reports ORDER BY id DESC LIMIT ?1`
   ).bind(limit).all();
   return jsonReply({ ok: true, rows: r.results || [] });
@@ -1443,22 +1424,18 @@ const ADMIN_HTML = `<!doctype html>
               <table id="error_table">
                 <thead>
                   <tr>
-                    <th style="width:140px">時間</th>
-                    <th style="width:60px">版本</th>
-                    <th style="width:120px">IP</th>
+                    <th style="width:130px">時間</th>
+                    <th style="width:55px">版本</th>
+                    <th style="width:110px">電腦</th>
+                    <th style="width:90px">使用者</th>
+                    <th style="width:115px">IP</th>
                     <th>觸發訊息</th>
-                    <th style="width:80px">log</th>
+                    <th style="width:60px">log</th>
                   </tr>
                 </thead>
                 <tbody></tbody>
               </table>
             </div>
-            <p style="margin-top:10px;font-size:11.5px;color:var(--ink-3);line-height:1.55">
-              💡 寄 email 到 za869765@gmail.com 需要設定 <code class="mono">RESEND_API_KEY</code>：
-              註冊 <a href="https://resend.com" target="_blank">resend.com</a>（免費 3000/月）→
-              <code class="mono">npx wrangler secret put RESEND_API_KEY</code>。
-              未設定時錯誤仍會收進此表，admin UI 看得到。
-            </p>
           </div>
         </div>
       </section>
@@ -1799,17 +1776,21 @@ async function loadErrors(){
   const tb = document.querySelector('#error_table tbody');
   tb.innerHTML = '';
   if (!r.rows.length){
-    tb.innerHTML = '<tr class="empty-row"><td colspan="5">沒有錯誤回報，全綠</td></tr>';
+    tb.innerHTML = '<tr class="empty-row"><td colspan="7">沒有錯誤回報，全綠</td></tr>';
     return;
   }
   for (const row of r.rows){
     const tr = document.createElement('tr');
     const trigger = (row.trigger || '').replace(/</g, '&lt;');
+    const host = (row.hostname || '').replace(/</g, '&lt;');
+    const user = (row.win_user || '').replace(/</g, '&lt;');
     tr.innerHTML =
       '<td class="ts">' + fmt(row.ts) + '</td>' +
       '<td class="mono">' + (row.version || '—') + '</td>' +
+      '<td class="mono" title="' + host + '">' + (host || '—') + '</td>' +
+      '<td class="mono" title="' + user + '">' + (user || '—') + '</td>' +
       '<td class="ip">' + (row.ip || '—') + '</td>' +
-      '<td title="' + trigger + '">' + (trigger.length > 80 ? trigger.slice(0, 80) + '…' : trigger) + '</td>' +
+      '<td title="' + trigger + '">' + (trigger.length > 60 ? trigger.slice(0, 60) + '…' : trigger) + '</td>' +
       '<td><button class="btn ghost tiny" onclick="window.viewErrorLog(' + row.id + ')">查看</button></td>';
     tb.appendChild(tr);
     // 把整個 row data 留著供查看用
@@ -1818,6 +1799,11 @@ async function loadErrors(){
     tr.dataset.version = row.version || '';
     tr.dataset.ua = row.ua || '';
     tr.dataset.country = row.country || '';
+    tr.dataset.hostname = row.hostname || '';
+    tr.dataset.winUser = row.win_user || '';
+    tr.dataset.mac = row.mac || '';
+    tr.dataset.osVer = row.os_ver || '';
+    tr.dataset.ip = row.ip || '';
   }
   // 暴露 viewErrorLog
   window.viewErrorLog = function(id){
@@ -1825,8 +1811,14 @@ async function loadErrors(){
       .find(tr => tr.querySelector('button[onclick*="viewErrorLog(' + id + ')"]'));
     if (!tr) return;
     const text = tr.dataset.logText || '(無內容)';
-    const meta = '時間 ' + fmt(tr.dataset.ts) + '\\n版本 ' + tr.dataset.version +
-                 '\\nUA ' + tr.dataset.ua + '\\n地區 ' + tr.dataset.country + '\\n\\n';
+    const meta = '時間 ' + fmt(tr.dataset.ts) + '\\n' +
+                 '版本 ' + tr.dataset.version + '\\n' +
+                 '電腦 ' + (tr.dataset.hostname || '—') + '\\n' +
+                 '使用者 ' + (tr.dataset.winUser || '—') + '\\n' +
+                 'MAC ' + (tr.dataset.mac || '—') + '\\n' +
+                 'OS ' + (tr.dataset.osVer || '—') + '\\n' +
+                 'IP ' + (tr.dataset.ip || '—') + ' (' + tr.dataset.country + ')\\n' +
+                 'UA ' + tr.dataset.ua + '\\n\\n';
     // 開新視窗顯示
     const w = window.open('', '_blank', 'width=900,height=600');
     if (!w) return toast('彈窗被擋了，請允許彈窗', 'err');
