@@ -51,6 +51,13 @@ export default {
       if (path === '/exe-download' && request.method === 'GET') {
         return await handleExeDownload(request, env);
       }
+      // v1.0.59 機器清單 + 後台資料清 0
+      if (path === '/admin/machines' && request.method === 'POST') {
+        return await handleAdminMachines(request, env);
+      }
+      if (path === '/admin/reset-data' && request.method === 'POST') {
+        return await handleAdminResetData(request, env);
+      }
       // v1.0.53 錯誤回報相關
       if (path === '/report-error' && request.method === 'POST') {
         return await handleReportError(request, env);
@@ -364,6 +371,71 @@ async function handleAdminDaily(request, env) {
     .bind(`-${days} days`)
     .all();
   return jsonReply({ ok: true, days, rows: r.results || [] });
+}
+
+// ── v1.0.59 機器清單（per-hostname 統計）───────
+async function handleAdminMachines(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await checkAdmin(body.admin_pwd, env))) {
+    return jsonReply({ ok: false, reason: '管理員密碼錯誤' }, 401);
+  }
+  // 主表：以 hostname 為單位
+  const r = await env.DB.prepare(
+    `SELECT
+        hostname,
+        COUNT(CASE WHEN ok=1 THEN 1 END) AS ok_cnt,
+        COUNT(CASE WHEN ok=0 THEN 1 END) AS fail_cnt,
+        COUNT(*) AS total,
+        COUNT(DISTINCT ip) AS ip_cnt,
+        MIN(ts) AS first_seen,
+        MAX(ts) AS last_seen,
+        (SELECT ua FROM audit a2 WHERE a2.hostname = audit.hostname ORDER BY id DESC LIMIT 1) AS last_ua,
+        (SELECT ip FROM audit a3 WHERE a3.hostname = audit.hostname ORDER BY id DESC LIMIT 1) AS last_ip,
+        (SELECT country FROM audit a4 WHERE a4.hostname = audit.hostname ORDER BY id DESC LIMIT 1) AS last_country
+     FROM audit
+     WHERE hostname != '' AND hostname IS NOT NULL
+     GROUP BY hostname
+     ORDER BY last_seen DESC`
+  ).all();
+  const rows = r.results || [];
+  // 補上每台的 error_reports 數 + win_user / mac / os_ver（從 error_reports 抓最新）
+  for (const m of rows) {
+    try {
+      const er = await env.DB.prepare(
+        `SELECT COUNT(*) AS n,
+                (SELECT win_user FROM error_reports e2 WHERE e2.hostname=?1 ORDER BY id DESC LIMIT 1) AS win_user,
+                (SELECT mac      FROM error_reports e3 WHERE e3.hostname=?1 ORDER BY id DESC LIMIT 1) AS mac,
+                (SELECT os_ver   FROM error_reports e4 WHERE e4.hostname=?1 ORDER BY id DESC LIMIT 1) AS os_ver
+         FROM error_reports WHERE hostname=?1`
+      ).bind(m.hostname).first();
+      m.error_cnt = (er && er.n) || 0;
+      m.win_user = (er && er.win_user) || '';
+      m.mac = (er && er.mac) || '';
+      m.os_ver = (er && er.os_ver) || '';
+    } catch {
+      m.error_cnt = 0;
+      m.win_user = m.mac = m.os_ver = '';
+    }
+  }
+  return jsonReply({ ok: true, machines: rows });
+}
+
+async function handleAdminResetData(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await checkAdmin(body.admin_pwd, env))) {
+    return jsonReply({ ok: false, reason: '管理員密碼錯誤' }, 401);
+  }
+  const tables = ['audit', 'error_reports'];
+  const results = {};
+  for (const t of tables) {
+    try {
+      const r = await env.DB.prepare(`DELETE FROM ${t}`).run();
+      results[t] = (r.meta && r.meta.changes) || 0;
+    } catch (e) {
+      results[t] = 'error';
+    }
+  }
+  return jsonReply({ ok: true, msg: '後台資料已清 0', results });
 }
 
 // ── v1.0.55 EXE 自動更新 ───────────────────────
@@ -1260,6 +1332,10 @@ const ADMIN_HTML = `<!doctype html>
 
       <div class="nav-section">監控</div>
       <nav class="nav">
+        <a href="#sec-machines">
+          <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="3" width="12" height="8" rx="1"/><path d="M5 14h6M8 11v3"/></svg>
+          電腦清單
+        </a>
         <a href="#sec-usage">
           <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 13h12"/><rect x="3" y="8" width="2" height="5"/><rect x="7" y="5" width="2" height="8"/><rect x="11" y="9" width="2" height="4"/></svg>
           使用統計
@@ -1300,19 +1376,19 @@ const ADMIN_HTML = `<!doctype html>
         <div class="card">
           <div class="card-body">
             <div class="state-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));">
-              <div class="state-cell">
+              <div class="state-cell" id="cell_today" style="cursor:help" title="">
                 <div class="k">今日登入</div>
                 <div class="v" style="font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums;"><span id="stat_today">—</span></div>
               </div>
-              <div class="state-cell">
+              <div class="state-cell" id="cell_today_ok" style="cursor:help" title="">
                 <div class="k">今日已產生總筆數</div>
                 <div class="v" style="font-size: 22px; font-weight: 700; color: var(--ok); font-variant-numeric: tabular-nums;"><span id="stat_today_ok">—</span></div>
               </div>
-              <div class="state-cell">
+              <div class="state-cell" id="cell_err_7d" style="cursor:help" title="">
                 <div class="k">7 天錯誤回報</div>
                 <div class="v" style="font-size: 22px; font-weight: 700; color: var(--bad); font-variant-numeric: tabular-nums;"><span id="stat_err_7d">—</span></div>
               </div>
-              <div class="state-cell">
+              <div class="state-cell" id="cell_machines" style="cursor:help" title="">
                 <div class="k">已使用電腦數</div>
                 <div class="v" style="font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums;"><span id="stat_machines_all">—</span></div>
               </div>
@@ -1346,9 +1422,6 @@ const ADMIN_HTML = `<!doctype html>
                 <div class="v ts" style="font-size: 12px;" id="exe_updated">—</div>
               </div>
             </div>
-            <p style="margin-top:10px;font-size:11.5px;color:var(--ink-3);line-height:1.55">
-              💡 升版 SOP：build EXE → 寫 manifest → <code class="mono">wrangler r2 object put</code> 上傳 latest.exe + manifest.json
-            </p>
           </div>
         </div>
         <!-- 設定狀態 -->
@@ -1480,6 +1553,51 @@ const ADMIN_HTML = `<!doctype html>
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8l3.5 3.5L13 5"/></svg>
                 恢復服務
               </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- v1.0.59 清 0 後台資料 -->
+        <div class="card">
+          <div class="card-header">
+            <h3>清 0 後台資料</h3>
+            <span class="help" style="color: var(--bad);">⚠ 不可逆 — 清空 audit + error_reports 兩張表</span>
+          </div>
+          <div class="card-body">
+            <p class="field-help warn" style="margin-bottom: 10px;">
+              用於初始化監控環境（部署初期想重新計數時用）。<strong>本 Worker 設定 / 密碼 / R2 manifest 不會動</strong>。
+            </p>
+            <button class="btn danger" onclick="resetData()" id="btn_reset_data">
+              清 0 全部監控資料
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 電腦清單（v1.0.59）===== -->
+      <section class="section" id="sec-machines">
+        <div class="section-head">
+          <h2 class="section-title">電腦清單</h2>
+          <span class="section-sub">每台用過的電腦：登入 / 失敗 / 錯誤回報 / 最後使用</span>
+        </div>
+        <div class="card">
+          <div class="card-body" style="padding: 0;">
+            <div class="scroll" style="max-height: 480px; border: 0; border-radius: 0;">
+              <table id="machines_table">
+                <thead>
+                  <tr>
+                    <th style="width:140px">電腦名稱</th>
+                    <th style="width:90px">使用者</th>
+                    <th style="width:60px">版本</th>
+                    <th style="width:80px;text-align:right">登入成功</th>
+                    <th style="width:70px;text-align:right">失敗</th>
+                    <th style="width:80px;text-align:right">錯誤回報</th>
+                    <th style="width:120px">最後使用</th>
+                    <th>細節</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
             </div>
           </div>
         </div>
@@ -2056,6 +2174,95 @@ async function loadErrors(){
   };
 }
 
+// v1.0.59 電腦清單
+async function loadMachines(){
+  if (!ADM) return;
+  const r = await api('/admin/machines', {admin_pwd: ADM});
+  const tb = document.querySelector('#machines_table tbody');
+  if (!tb) return;
+  if (!r.ok){
+    tb.innerHTML = '<tr class="empty-row"><td colspan="8">' + (r.reason || '失敗') + '</td></tr>';
+    return;
+  }
+  const machines = r.machines || [];
+  tb.innerHTML = '';
+  if (!machines.length){
+    tb.innerHTML = '<tr class="empty-row"><td colspan="8">尚無電腦使用紀錄</td></tr>';
+    return;
+  }
+  for (const m of machines){
+    const ver = ((m.last_ua || '').match(/HIV-Auth-Client\\/([\\d.]+)/) || [])[1] || '—';
+    const winUser = (m.win_user || '—').replace(/</g, '&lt;');
+    const host = (m.hostname || '—').replace(/</g, '&lt;');
+    const errCnt = m.error_cnt || 0;
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td class="mono">' + host + '</td>' +
+      '<td class="mono">' + winUser + '</td>' +
+      '<td class="mono">' + ver + '</td>' +
+      '<td class="num ok">' + (m.ok_cnt || 0) + '</td>' +
+      '<td class="num bad">' + (m.fail_cnt || 0) + '</td>' +
+      '<td class="num" style="color:' + (errCnt > 0 ? 'var(--bad)' : 'var(--ink-3)') + '">' + errCnt + '</td>' +
+      '<td class="ts">' + fmt(m.last_seen) + '</td>' +
+      '<td><button class="btn ghost tiny" onclick="window.viewMachine(\\'' + host.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'") + '\\')">細節</button></td>';
+    tb.appendChild(tr);
+    tr.dataset.json = JSON.stringify(m);
+  }
+  // 暴露 viewMachine
+  window.viewMachine = function(hostname){
+    const tr = [...document.querySelectorAll('#machines_table tbody tr')]
+      .find(tr => {
+        try { return JSON.parse(tr.dataset.json || '{}').hostname === hostname; }
+        catch { return false; }
+      });
+    if (!tr) return;
+    const m = JSON.parse(tr.dataset.json);
+    const ver = ((m.last_ua || '').match(/HIV-Auth-Client\\/([\\d.]+)/) || [])[1] || '—';
+    const txt =
+      '電腦名稱  ' + (m.hostname || '—') + '\\n' +
+      '使用者    ' + (m.win_user || '—') + '\\n' +
+      '版本      ' + ver + '\\n' +
+      'MAC       ' + (m.mac || '—') + '\\n' +
+      'OS        ' + (m.os_ver || '—') + '\\n' +
+      '\\n=== 統計 ===\\n' +
+      '登入成功  ' + (m.ok_cnt || 0) + '\\n' +
+      '登入失敗  ' + (m.fail_cnt || 0) + '\\n' +
+      '錯誤回報  ' + (m.error_cnt || 0) + '\\n' +
+      '不同 IP   ' + (m.ip_cnt || 0) + '\\n' +
+      '\\n=== 時間 ===\\n' +
+      '首次出現  ' + fmt(m.first_seen) + '\\n' +
+      '最後使用  ' + fmt(m.last_seen) + '\\n' +
+      '最後 IP   ' + (m.last_ip || '—') + ' (' + (m.last_country || '—') + ')\\n' +
+      '\\n=== UA ===\\n' + (m.last_ua || '—');
+    const w = window.open('', '_blank', 'width=720,height=560');
+    if (!w) return toast('彈窗被擋了', 'err');
+    w.document.title = '電腦細節 — ' + (m.hostname || '');
+    const pre = w.document.createElement('pre');
+    pre.style.cssText = 'font:12.5px ui-monospace,Consolas,monospace;background:#14181f;color:#c4cbd6;padding:18px;margin:0;white-space:pre-wrap;min-height:100vh';
+    pre.textContent = txt;
+    w.document.body.style.margin = '0';
+    w.document.body.appendChild(pre);
+  };
+}
+
+// v1.0.59 清 0 後台資料
+window.resetData = async function(){
+  if (!confirm('⚠ 確定清 0 audit + error_reports 兩張表？此動作不可逆！\\n（密碼 / 設定 / R2 manifest 不會被清）')) return;
+  if (!confirm('再確認一次：真的要清空所有監控紀錄？')) return;
+  const btn = document.getElementById('btn_reset_data');
+  if (btn) { btn.disabled = true; btn.textContent = '清除中…'; }
+  const r = await api('/admin/reset-data', {admin_pwd: ADM});
+  if (btn) { btn.disabled = false; btn.textContent = '清 0 全部監控資料'; }
+  if (!r.ok) return toast(r.reason || '失敗', 'err');
+  toast(r.msg || '已清空', 'ok');
+  // 重新載入所有相關區域
+  loadOverview();
+  if (typeof loadAudit === 'function') loadAudit();
+  if (typeof loadErrors === 'function') loadErrors();
+  if (typeof loadMachines === 'function') loadMachines();
+  if (typeof loadDaily === 'function') loadDaily(true);
+};
+
 window.clearErrors = withLoading('btn_err_clear', async function(){
   const n = parseInt(document.getElementById('error_clear_days').value, 10);
   if (isNaN(n) || n < 0) return toast('請輸入 0 或以上的數字', 'err');
@@ -2183,9 +2390,9 @@ document.getElementById('adm').addEventListener('keydown', e => {
   if (e.key === 'Enter') login();
 });
 
-// v1.0.55 Accordion + Sidebar nav
+// v1.0.55/59 Accordion + Sidebar nav
 (function setupNav(){
-  const sections = ['sec-overview','sec-passwords','sec-service','sec-usage','sec-audit','sec-errors'];
+  const sections = ['sec-overview','sec-passwords','sec-service','sec-machines','sec-usage','sec-audit','sec-errors'];
   const links = document.querySelectorAll('.nav a[href^="#"]');
 
   // 給每個 section-head 加 ▾ icon + click toggle
@@ -2206,6 +2413,7 @@ document.getElementById('adm').addEventListener('keydown', e => {
         else if (sec.id === 'sec-usage') loadDaily(true);
         else if (sec.id === 'sec-audit') loadAudit();
         else if (sec.id === 'sec-errors') loadErrors();
+        else if (sec.id === 'sec-machines') loadMachines();
       }
     });
   });
@@ -2230,6 +2438,7 @@ document.getElementById('adm').addEventListener('keydown', e => {
         else if (id === 'sec-usage') loadDaily(true);
         else if (id === 'sec-audit') loadAudit();
         else if (id === 'sec-errors') loadErrors();
+        else if (id === 'sec-machines') loadMachines();
         links.forEach(l => l.classList.remove('active'));
         a.classList.add('active');
       }
@@ -2274,6 +2483,29 @@ async function loadOverview(){
       setN('stat_today_ok', r24.ok_cnt);        // 今日已產生總筆數：24h 成功登入（每次成功 ≈ 一個批次 session）
       setN('stat_err_7d', s.error_reports_7d);  // 7 天錯誤回報：error_reports 表 7d
       setN('stat_machines_all', s.machines_all); // 已使用電腦數：累計不同 hostname
+
+      // v1.0.59：游標停留時的明細 tooltip（用 title 屬性最簡單）
+      const setTitle = (id, t) => {
+        const el = document.getElementById(id);
+        if (el) el.title = t;
+      };
+      setTitle('cell_today',
+        '24 小時內登入嘗試明細\\n' +
+        '─────────────────\\n' +
+        '成功    ' + (r24.ok_cnt || 0) + '\\n' +
+        '失敗    ' + (r24.fail_cnt || 0) + '\\n' +
+        '不同 IP ' + (r24.uniq_ip || 0) + '\\n' +
+        '不同電腦 ' + (r24.uniq_machine || 0));
+      setTitle('cell_today_ok',
+        '24 小時成功登入：每次代表一台 EXE 開始一個批次 session\\n' +
+        '由於 Worker 沒攔截 EXE 內部的代碼產生，這數字 ≈ 批次次數\\n' +
+        '真實代碼總數 = 此次數 × 每批次平均產出（依使用者設定）');
+      setTitle('cell_err_7d',
+        '7 天 error_reports 累計\\n' +
+        'EXE 偵測紅色錯誤 log 自動上傳的回報，至「錯誤回報」分頁看完整內容');
+      setTitle('cell_machines',
+        '累計不同 hostname 數（不限時間）\\n' +
+        '至「電腦清單」分頁看每台明細');
     }
   } catch {}
   // v1.0.57：拉最新 EXE 版本資訊
