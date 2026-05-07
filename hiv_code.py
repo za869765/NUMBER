@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.46"
+VERSION = "1.0.47"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -73,35 +73,40 @@ def set_output_dir(new_path):
     OUTPUT_DIR = new_path
     ensure_outdir()
 
-# ── v1.0.18 主題配色 ──
+# ── v1.0.18 主題配色 / v1.0.47 套用 Claude Design 概念稿（Linear+Apple Health+5%AC）──
+# 4 套色票對應使用情境：
+#   Ocean   上午門診    清醒可信任，海平線藍配冷灰底
+#   Sunset  下午外展尾聲 黃昏赤陶，溫暖收束
+#   Forest  戶外場域    苔綠杉林，平靜低疲勞
+#   Dark    夜間站點    深石板灰（非全黑）+ 反光衣藍
 THEMES = {
     "Ocean (海洋藍)": {
-        "bg": "#eef5fa", "panel": "#ffffff", "fg": "#1a2a3a",
-        "accent": "#1565c0", "accent_hover": "#0d47a1",
-        "success": "#2e7d32", "warn": "#ef6c00", "error": "#c62828",
-        "log_bg": "#0e1a26", "log_fg": "#dce6f0",
-        "log_success": "#66bb6a", "log_warn": "#ffb74d", "log_error": "#ef5350",
+        "bg": "#f3f5f8", "panel": "#ffffff", "fg": "#1a2230",
+        "accent": "#2c6bd1", "accent_hover": "#1f4f9c",
+        "success": "#2f7a4d", "warn": "#b07414", "error": "#b13a2e",
+        "log_bg": "#14181f", "log_fg": "#c4cbd6",
+        "log_success": "#5fc38a", "log_warn": "#e9b25c", "log_error": "#e87767",
     },
     "Sunset (夕陽橘)": {
-        "bg": "#fff3e0", "panel": "#fffbf5", "fg": "#3e2723",
-        "accent": "#e65100", "accent_hover": "#bf360c",
-        "success": "#558b2f", "warn": "#ef6c00", "error": "#c62828",
-        "log_bg": "#1f1612", "log_fg": "#ffe0b2",
-        "log_success": "#9ccc65", "log_warn": "#ffb74d", "log_error": "#ef5350",
+        "bg": "#faf2ec", "panel": "#ffffff", "fg": "#2a201a",
+        "accent": "#d96b3a", "accent_hover": "#a84c20",
+        "success": "#7a8c3f", "warn": "#c08a1a", "error": "#a84830",
+        "log_bg": "#14181f", "log_fg": "#c4cbd6",
+        "log_success": "#5fc38a", "log_warn": "#e9b25c", "log_error": "#e87767",
     },
     "Forest (森林綠)": {
-        "bg": "#e8f5e9", "panel": "#f7fbf7", "fg": "#1b3a1e",
-        "accent": "#2e7d32", "accent_hover": "#1b5e20",
-        "success": "#43a047", "warn": "#f57c00", "error": "#d32f2f",
-        "log_bg": "#0e1a12", "log_fg": "#c8e6c9",
-        "log_success": "#81c784", "log_warn": "#ffb74d", "log_error": "#ef5350",
+        "bg": "#f1f6f1", "panel": "#ffffff", "fg": "#1a2a1f",
+        "accent": "#1f5a37", "accent_hover": "#2f7a4d",
+        "success": "#2f7a4d", "warn": "#a87a1c", "error": "#a23e2b",
+        "log_bg": "#14181f", "log_fg": "#c4cbd6",
+        "log_success": "#5fc38a", "log_warn": "#e9b25c", "log_error": "#e87767",
     },
     "Dark (深色)": {
-        "bg": "#263238", "panel": "#37474f", "fg": "#eceff1",
-        "accent": "#26c6da", "accent_hover": "#0097a7",
-        "success": "#66bb6a", "warn": "#ffa726", "error": "#ef5350",
-        "log_bg": "#1c2025", "log_fg": "#cfd8dc",
-        "log_success": "#81c784", "log_warn": "#ffb74d", "log_error": "#ef5350",
+        "bg": "#1a1f27", "panel": "#232a35", "fg": "#e3e8ef",
+        "accent": "#4a90e2", "accent_hover": "#76aef0",
+        "success": "#5fc38a", "warn": "#e9b25c", "error": "#e87767",
+        "log_bg": "#14181f", "log_fg": "#c4cbd6",
+        "log_success": "#5fc38a", "log_warn": "#e9b25c", "log_error": "#e87767",
     },
 }
 DEFAULT_THEME = "Ocean (海洋藍)"
@@ -1834,9 +1839,14 @@ class App:
         ttk.Label(log_btns, text="（儲存 Log 會將目前畫面內容存成 .txt，方便回報修正）",
                   foreground="#666").pack(side="left", padx=12)
 
-        # ── v1.0.45 免責聲明（最底列） ──
+        # ── v1.0.45 免責聲明 / v1.0.47 雙欄：左版本+build、右免責聲明 ──
         disclaimer_fr = ttk.Frame(self.root)
-        disclaimer_fr.pack(fill="x", padx=6, pady=(0, 4))
+        disclaimer_fr.pack(fill="x", padx=14, pady=(0, 6))
+        build_date = datetime.datetime.now().strftime("%Y.%m.%d")
+        ttk.Label(disclaimer_fr,
+                  text=f"v{VERSION} · build {build_date}",
+                  foreground="#9e9e9e",
+                  font=("Consolas", 9)).pack(side="left")
         ttk.Label(disclaimer_fr,
                   text="⚠ 免責聲明：本工具僅供研究網頁服務技術用途",
                   foreground="#9e9e9e",
