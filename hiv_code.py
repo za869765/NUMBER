@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.49"
+VERSION = "1.0.50"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -1806,45 +1806,97 @@ class App:
         ttk.Label(top, text=" ~ ").grid(row=0, column=4)
         self._mk_int_entry(top, self.year_hi, width=6, justify="center").grid(row=0, column=5, padx=2, pady=4)
 
-        # ─ 速度 / 延遲設定 ─
-        speed = ttk.LabelFrame(topbar, text="速度 / 延遲設定（秒；隨機區間，避免太規律被偵測）")
+        # ─ 速度 / 延遲設定（v1.0.50：Claude Design 概念稿 3.2 節奏控制）─
+        speed = ttk.LabelFrame(topbar, text="節奏控制（按一個 preset 即可，進階自訂可展開）")
         speed.pack(side="left", fill="x", expand=True, padx=(4, 0))
-        # 預設 combo
-        ttk.Label(speed, text="預設模式：").grid(row=0, column=0, padx=4, pady=4, sticky="w")
-        self.speed_preset = tk.StringVar(value="中（推薦）")
-        cb = ttk.Combobox(speed, textvariable=self.speed_preset, width=14, state="readonly",
-                          values=["快（偷懶模式）", "中（推薦）", "慢（高峰時段）", "極慢（嚴重塞車）", "自訂"])
-        cb.grid(row=0, column=1, padx=4, pady=4, sticky="w")
-        cb.bind("<<ComboboxSelected>>", self._apply_speed_preset)
 
-        ttk.Label(speed, text="動作延遲：").grid(row=1, column=0, padx=4, pady=2, sticky="w")
+        # 4 顆 preset chip 按鈕
+        self.speed_preset = tk.StringVar(value="中（推薦）")
+        chips = [("🐇 快", "快（偷懶模式）"),
+                 ("🚶 中", "中（推薦）"),
+                 ("🐢 慢", "慢（高峰時段）"),
+                 ("⏳ 極慢", "極慢（嚴重塞車）")]
+        chip_fr = ttk.Frame(speed)
+        chip_fr.grid(row=0, column=0, columnspan=5, padx=4, pady=(8, 4), sticky="w")
+        ttk.Label(chip_fr, text="速度：", font=("微軟正黑體", 10, "bold")).pack(side="left", padx=(0, 8))
+        self._chip_btns = {}
+        def _click_chip(value):
+            self.speed_preset.set(value)
+            self._apply_speed_preset(None)
+            _update_chip_state()
+        for label, value in chips:
+            btn = ttk.Button(chip_fr, text=label, width=8,
+                              command=lambda v=value: _click_chip(v))
+            btn.pack(side="left", padx=2)
+            self._chip_btns[value] = btn
+        # active chip 視覺：用 state="pressed" 模擬，或維持普通；簡單用 text 加標
+        def _update_chip_state():
+            cur = self.speed_preset.get()
+            for v, btn in self._chip_btns.items():
+                if v == cur:
+                    btn.state(["pressed"])
+                else:
+                    btn.state(["!pressed"])
+        _update_chip_state()
+        # 顯示目前預設名稱（自訂時會出現「自訂」）
+        self._speed_label = ttk.Label(chip_fr, textvariable=self.speed_preset,
+                                       foreground="#7d8696", font=("Consolas", 9))
+        self._speed_label.pack(side="left", padx=(12, 0))
+
+        # 等待逾時（總是可見，這是常用、跟連線速度有關）
+        ttk.Label(speed, text="等待逾時：").grid(row=1, column=0, padx=4, pady=4, sticky="w")
+        self.dly_timeout = tk.IntVar(value=30)
+        self._mk_int_entry(speed, self.dly_timeout, width=6).grid(row=1, column=1, padx=2)
+        ttk.Label(speed, text="秒  （多人連線會慢，建議 30+）",
+                  foreground="#666").grid(row=1, column=2, columnspan=3, padx=4, sticky="w")
+
+        # 進階區間設定（disclosure：點開才顯示 6 個 entry）
+        self._adv_visible = False
+        self._adv_btn_text = tk.StringVar(value="▶ 進階區間設定（自訂秒數）")
+        adv_btn = ttk.Button(speed, textvariable=self._adv_btn_text,
+                              command=lambda: _toggle_adv())
+        adv_btn.grid(row=2, column=0, columnspan=5, padx=4, pady=(6, 4), sticky="w")
+
+        adv_fr = ttk.Frame(speed)
+        # 不 grid → 預設隱藏
+
+        # 動作延遲
+        ttk.Label(adv_fr, text="動作延遲：").grid(row=0, column=0, padx=4, pady=2, sticky="w")
         self.dly_act_lo = tk.DoubleVar(value=0.3)
         self.dly_act_hi = tk.DoubleVar(value=0.7)
-        self._mk_float_entry(speed, self.dly_act_lo, width=6).grid(row=1, column=1, padx=2)
-        ttk.Label(speed, text="~").grid(row=1, column=2)
-        self._mk_float_entry(speed, self.dly_act_hi, width=6).grid(row=1, column=3, padx=2)
-        ttk.Label(speed, text="（每點 radio/select 後）", foreground="#666").grid(row=1, column=4, padx=8, sticky="w")
-
-        ttk.Label(speed, text="頁面切換延遲：").grid(row=2, column=0, padx=4, pady=2, sticky="w")
+        self._mk_float_entry(adv_fr, self.dly_act_lo, width=6).grid(row=0, column=1, padx=2)
+        ttk.Label(adv_fr, text="~").grid(row=0, column=2)
+        self._mk_float_entry(adv_fr, self.dly_act_hi, width=6).grid(row=0, column=3, padx=2)
+        ttk.Label(adv_fr, text="（每點 radio/select 後）", foreground="#666").grid(row=0, column=4, padx=8, sticky="w")
+        # 頁面切換延遲
+        ttk.Label(adv_fr, text="頁面切換延遲：").grid(row=1, column=0, padx=4, pady=2, sticky="w")
         self.dly_page_lo = tk.DoubleVar(value=0.8)
         self.dly_page_hi = tk.DoubleVar(value=1.5)
-        self._mk_float_entry(speed, self.dly_page_lo, width=6).grid(row=2, column=1, padx=2)
-        ttk.Label(speed, text="~").grid(row=2, column=2)
-        self._mk_float_entry(speed, self.dly_page_hi, width=6).grid(row=2, column=3, padx=2)
-        ttk.Label(speed, text="（按下一步後）", foreground="#666").grid(row=2, column=4, padx=8, sticky="w")
-
-        ttk.Label(speed, text="每筆間隔：").grid(row=3, column=0, padx=4, pady=2, sticky="w")
+        self._mk_float_entry(adv_fr, self.dly_page_lo, width=6).grid(row=1, column=1, padx=2)
+        ttk.Label(adv_fr, text="~").grid(row=1, column=2)
+        self._mk_float_entry(adv_fr, self.dly_page_hi, width=6).grid(row=1, column=3, padx=2)
+        ttk.Label(adv_fr, text="（按下一步後）", foreground="#666").grid(row=1, column=4, padx=8, sticky="w")
+        # 每筆間隔
+        ttk.Label(adv_fr, text="每筆間隔：").grid(row=2, column=0, padx=4, pady=2, sticky="w")
         self.dly_btw_lo = tk.DoubleVar(value=1.5)
         self.dly_btw_hi = tk.DoubleVar(value=3.0)
-        self._mk_float_entry(speed, self.dly_btw_lo, width=6).grid(row=3, column=1, padx=2)
-        ttk.Label(speed, text="~").grid(row=3, column=2)
-        self._mk_float_entry(speed, self.dly_btw_hi, width=6).grid(row=3, column=3, padx=2)
-        ttk.Label(speed, text="（取完一筆到下一筆開始）", foreground="#666").grid(row=3, column=4, padx=8, sticky="w")
+        self._mk_float_entry(adv_fr, self.dly_btw_lo, width=6).grid(row=2, column=1, padx=2)
+        ttk.Label(adv_fr, text="~").grid(row=2, column=2)
+        self._mk_float_entry(adv_fr, self.dly_btw_hi, width=6).grid(row=2, column=3, padx=2)
+        ttk.Label(adv_fr, text="（取完一筆到下一筆開始）", foreground="#666").grid(row=2, column=4, padx=8, sticky="w")
 
-        ttk.Label(speed, text="等待逾時：").grid(row=4, column=0, padx=4, pady=2, sticky="w")
-        self.dly_timeout = tk.IntVar(value=30)
-        self._mk_int_entry(speed, self.dly_timeout, width=6).grid(row=4, column=1, padx=2)
-        ttk.Label(speed, text="秒  （多人連線會慢，建議 30+）", foreground="#666").grid(row=4, column=2, columnspan=3, padx=4, sticky="w")
+        def _toggle_adv():
+            if self._adv_visible:
+                adv_fr.grid_forget()
+                self._adv_btn_text.set("▶ 進階區間設定（自訂秒數）")
+                self._adv_visible = False
+            else:
+                adv_fr.grid(row=3, column=0, columnspan=5, padx=4, pady=(0, 4), sticky="ew")
+                self._adv_btn_text.set("▼ 進階區間設定（自訂秒數）")
+                self._adv_visible = True
+
+        # 監聽 self.speed_preset 變化，更新 chip active 視覺（_apply_speed_preset 會被外部 set）
+        self.speed_preset.trace_add("write", lambda *a: _update_chip_state())
 
         # ─ 比例設定區（2 欄並列） ─
         # 左欄：性別 / 國籍 / 教育
