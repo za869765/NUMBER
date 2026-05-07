@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -4181,6 +4181,14 @@ def show_password_gate(parent):
                     total = 0
                     try: total = int(resp.headers.get("Content-Length", 0))
                     except Exception: total = 0
+                    # v1.1.2：urlopen 一回來就立刻把按鈕從「準備中」改成「下載中…」
+                    # 確保使用者看得到狀態變化，而不是一直停在準備中
+                    mb = total // 1024 // 1024 if total else 0
+                    init_text = (f"⬇ 已連上，正在下載 v{update_state['latest']} "
+                                 f"({mb} MB)…" if mb else
+                                 "⬇ 已連上，正在下載新版本…")
+                    dlg.after(0, lambda t=init_text: _set_msg(t, ACCENT))
+                    dlg.after(0, lambda: _set_btn("下載中… 0%", state="disabled"))
                     received = 0
                     last_ui = 0
                     with open(tmp, "wb") as f:
@@ -4227,9 +4235,10 @@ def show_password_gate(parent):
                     except Exception:
                         sz = 0
                     if sz < 30 * 1024 * 1024:  # 新 EXE 應該 > 30MB
-                        _set_msg(f"⚠ 新版檔案大小異常（{sz} bytes）\n保留舊版可繼續使用，"
-                                  f"請改至 admin UI 手動下載", "#c62828")
-                        _set_btn("關閉", cmd=dlg.destroy, state="normal", bg="#c62828")
+                        _set_msg(f"⚠ 新版檔案異常（{sz} bytes）\n請點下方重試。",
+                                 "#c62828")
+                        _set_btn("重新下載", cmd=_do_force_update,
+                                 state="normal", bg="#c62828")
                         return
                     import subprocess
                     try:
@@ -4242,11 +4251,11 @@ def show_password_gate(parent):
                             cwd=exe_dir,
                         )
                     except Exception as e:
-                        _set_msg(f"⚠ 啟動新版失敗：{e}\n舊版仍可用，請手動雙擊新檔",
+                        _set_msg(f"⚠ 啟動新版失敗：{e}\n請手動雙擊新檔。",
                                  "#c62828")
-                        _set_btn("關閉", cmd=dlg.destroy, state="normal", bg="#c62828")
-                        try: os.startfile(exe_dir)
-                        except Exception: pass
+                        _set_btn("關閉並開啟資料夾",
+                                 cmd=lambda: (os.startfile(exe_dir), dlg.destroy()),
+                                 state="normal", bg="#c62828")
                         return
                     # 新版已啟動 → 自我退出（result["ok"]=False 讓 main() 直接 sys.exit）
                     _set_msg("新版已啟動，本工具即將關閉…", "#2e7d32")
@@ -4263,8 +4272,9 @@ def show_password_gate(parent):
                 try: os.remove(tmp)
                 except Exception: pass
                 dlg.after(0, lambda m=err: (
-                    _set_msg(f"⚠ 下載失敗：{m}\n請改至 admin UI 手動下載", "#c62828"),
-                    _set_btn("立即更新", cmd=_do_force_update, state="normal", bg="#c62828"),
+                    _set_msg(f"⚠ 下載失敗：{m}\n請點下方重試。", "#c62828"),
+                    _set_btn("重新下載", cmd=_do_force_update,
+                             state="normal", bg="#c62828"),
                 ))
             finally:
                 busy["v"] = False
@@ -4272,11 +4282,13 @@ def show_password_gate(parent):
         threading.Thread(target=_bg_download, daemon=True).start()
 
     # 取消（左）+ 登入（右），登入按鈕隆重大顆
-    tk.Button(btnf, text="取消", width=10, command=dlg.destroy,
+    # v1.1.2：強制更新模式會把「取消」整顆移除（不讓使用者跳過）
+    btn_cancel = tk.Button(btnf, text="取消", width=10, command=dlg.destroy,
               font=("Microsoft JhengHei", 12),
               bg="#ffffff", fg="#37474f",
               activebackground="#eceff1", activeforeground="#37474f",
-              relief="flat", bd=0, padx=18, pady=10, cursor="hand2").pack(side="left")
+              relief="flat", bd=0, padx=18, pady=10, cursor="hand2")
+    btn_cancel.pack(side="left")
     btn_login = tk.Button(btnf, text="登 入", width=14, command=do_login,
               bg=ACCENT, fg="white",
               activebackground=ACCENT_DARK, activeforeground="white",
@@ -4338,10 +4350,10 @@ def show_password_gate(parent):
             return
         cmp_ = _semver_compare(latest, VERSION)
         if cmp_ > 0:
-            # 強制更新模式
+            # 強制更新模式（v1.1.2：取消鈕直接移除，X 改成關閉整個程式）
             latest_var.set(f"雲端版本：v{latest}  ⚠ 必須更新")
             latest_lbl.config(fg="#c62828", font=("Consolas", 10, "bold"))
-            msg.config(text=f"⚠ 偵測到新版 v{latest}（你目前 v{VERSION}），必須先更新才能繼續使用。",
+            msg.config(text=f"⚠ 偵測到新版 v{latest}（你目前 v{VERSION}），必須更新後才能使用。",
                        fg="#c62828")
             e1.config(state="disabled")
             update_state["required"] = True
@@ -4353,6 +4365,9 @@ def show_password_gate(parent):
             update_state["url"] = durl
             btn_login.config(text="立即更新", command=_do_force_update,
                               bg="#c62828", activebackground="#8b0000")
+            try: btn_cancel.pack_forget()
+            except Exception: pass
+            dlg.protocol("WM_DELETE_WINDOW", lambda: os._exit(0))
         else:
             latest_var.set(f"雲端版本：v{latest}  ✓ 已是最新")
             latest_lbl.config(fg="#2e7d32")
