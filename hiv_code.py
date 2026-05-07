@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.43"
+VERSION = "1.0.44"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -1610,13 +1610,16 @@ class App:
                         value="簡易（比例分布）", command=self._on_mode_change).pack(side="left", padx=10, pady=6)
         ttk.Radiobutton(mode_fr, text="📋 完整（匯入 xlsx 逐筆指定）", variable=self.mode_var,
                         value="完整（匯入xlsx）", command=self._on_mode_change).pack(side="left", padx=10, pady=6)
-        ttk.Button(mode_fr, text="📤 下載範例 xlsx",
-                   command=self._export_sample_xlsx).pack(side="left", padx=12)
-        ttk.Button(mode_fr, text="📥 匯入 xlsx",
+        # v1.0.44：xlsx 工具列只在「完整模式」顯示，簡易模式不需要
+        self._batch_xlsx_tools = ttk.Frame(mode_fr)
+        ttk.Button(self._batch_xlsx_tools, text="📤 下載範例 xlsx",
+                   command=self._export_sample_xlsx).pack(side="left", padx=4)
+        ttk.Button(self._batch_xlsx_tools, text="📥 匯入 xlsx",
                    command=self._import_xlsx).pack(side="left", padx=4)
         self.import_status_var = tk.StringVar(value="（未匯入）")
-        ttk.Label(mode_fr, textvariable=self.import_status_var,
+        ttk.Label(self._batch_xlsx_tools, textvariable=self.import_status_var,
                   foreground="#1565c0", font=("微軟正黑體", 9, "bold")).pack(side="left", padx=12)
+        # 簡易為 default → 啟動時不 pack（_on_mode_change 切換時才顯示）
 
         # ── 批次取號分頁內容 ──
         # v1.0.23：完整模式專用預覽列表（簡易模式時隱藏）
@@ -1718,9 +1721,9 @@ class App:
         # 左側：輔助按鈕 + 路徑說明
         left = ttk.Frame(btn_fr)
         left.pack(side="left", fill="y")
-        ttk.Button(left, text="📁 輸出資料夾", command=self.open_outdir).pack(side="left", padx=2)
-        ttk.Button(left, text="📋 log 資料夾", command=self.open_logdir).pack(side="left", padx=2)
-        ttk.Button(left, text="🐛 debug 資料夾", command=self.open_debugdir).pack(side="left", padx=2)
+        # v1.0.44：簡化為單一「輸出資料夾」放大按鈕；log/debug 子資料夾隱藏不暴露給使用者
+        ttk.Button(left, text="📁 輸出資料夾", command=self.open_outdir,
+                   style="Medium.TButton").pack(side="left", padx=2)
         ttk.Label(left, text=f"  輸出：{OUTPUT_DIR}", foreground="#666").pack(side="left", padx=8)
 
         # 右側：大按鈕（開始 / 暫停 / 停止）
@@ -1731,6 +1734,7 @@ class App:
             big_style.configure("Big.TButton",     font=("微軟正黑體", 14, "bold"), padding=(20, 10))
             big_style.configure("BigPause.TButton",font=("微軟正黑體", 14, "bold"), padding=(16, 10), foreground="#e65100")
             big_style.configure("BigStop.TButton", font=("微軟正黑體", 14, "bold"), padding=(16, 10), foreground="#b71c1c")
+            big_style.configure("Medium.TButton",  font=("微軟正黑體", 11, "bold"), padding=(14, 8))  # v1.0.44 輸出資料夾用
         except Exception:
             pass
         # v1.0.26：按鈕依當前分頁切換行為
@@ -2442,11 +2446,13 @@ class App:
         is_complete = (self.mode_var.get() == "完整（匯入xlsx）")
         try:
             if is_complete:
+                self._batch_xlsx_tools.pack(side="left", padx=4)  # v1.0.44
                 self._batch_topbar.pack_forget()
                 self._batch_midbar.pack_forget()
                 self._batch_preview_fr.pack(fill="x", padx=6, pady=4)
                 self.log("📋 切換到完整模式（請匯入 xlsx）")
             else:
+                self._batch_xlsx_tools.pack_forget()  # v1.0.44
                 self._batch_preview_fr.pack_forget()
                 self._batch_topbar.pack(fill="x", padx=6, pady=4)
                 self._batch_midbar.pack(fill="x", padx=6, pady=4)
