@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.57"
+VERSION = "1.0.58"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -4008,12 +4008,12 @@ def show_password_gate(parent):
     frm = tk.Frame(dlg, padx=44, pady=32, bg=BG)
     frm.pack(fill="both", expand=True)
 
-    # 大標題（icon 跟文字並排）
+    # 大標題（icon 跟文字並排）— v1.0.58 icon 改紅絲帶 🎗 (HIV 公益意象)
     head_fr = tk.Frame(frm, bg=BG)
     head_fr.pack(anchor="w")
-    tk.Label(head_fr, text="🔐",
-             font=("Segoe UI Emoji", 28),
-             bg=BG, fg=ACCENT).pack(side="left", padx=(0, 12))
+    tk.Label(head_fr, text="🎗",
+             font=("Segoe UI Emoji", 32),
+             bg=BG, fg="#c62828").pack(side="left", padx=(0, 14))
     title_fr = tk.Frame(head_fr, bg=BG)
     title_fr.pack(side="left")
     tk.Label(title_fr, text="諮詢代碼取號小工具",
@@ -4024,7 +4024,17 @@ def show_password_gate(parent):
              bg=BG, fg="#5a6577").pack(anchor="w", pady=(2, 0))
 
     # 分隔線
-    tk.Frame(frm, bg="#cfd8dc", height=1).pack(fill="x", pady=(20, 18))
+    tk.Frame(frm, bg="#cfd8dc", height=1).pack(fill="x", pady=(20, 14))
+
+    # v1.0.58 版本資訊條（左：目前版本、右：雲端最新版本 / 檢查中…）
+    ver_fr = tk.Frame(frm, bg=BG)
+    ver_fr.pack(fill="x", pady=(0, 14))
+    tk.Label(ver_fr, text=f"目前版本：v{VERSION}", bg=BG, fg="#37474f",
+             font=("Consolas", 10)).pack(side="left")
+    latest_var = tk.StringVar(value="雲端版本：檢查中…")
+    latest_lbl = tk.Label(ver_fr, textvariable=latest_var, bg=BG, fg="#7d8696",
+                           font=("Consolas", 10))
+    latest_lbl.pack(side="right")
 
     # 密碼輸入區（label + Entry 大、留白多）
     tk.Label(frm, text="密碼", bg=BG, fg="#37474f",
@@ -4047,6 +4057,8 @@ def show_password_gate(parent):
 
     busy = {"v": False}
     btn_login = None
+    # v1.0.58 強制更新狀態
+    update_state = {"required": False, "url": None, "filename": None, "latest": None}
 
     def do_login():
         if busy["v"]:
@@ -4079,6 +4091,40 @@ def show_password_gate(parent):
 
     btnf = tk.Frame(frm, bg=BG)
     btnf.pack(fill="x", pady=(28, 0))
+
+    # v1.0.58 強制更新處理：偵測新版時把「登入」改成「立即更新」
+    def _do_force_update():
+        if busy["v"]: return
+        busy["v"] = True
+        btn_login.config(state="disabled", text="下載中…")
+        msg.config(text="🌐 正在下載新版 EXE，下載完請關閉本工具切換新版…", fg=ACCENT)
+        dlg.update_idletasks()
+        import urllib.request
+        try:
+            url = update_state["url"]
+            filename = update_state["filename"] or f"HIV取號_v{update_state['latest']}.exe"
+            exe_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+                      else os.path.dirname(os.path.abspath(__file__))
+            new_path = os.path.join(exe_dir, filename)
+            tmp = new_path + ".downloading"
+            with urllib.request.urlopen(url, timeout=120) as resp:
+                with open(tmp, "wb") as f:
+                    while True:
+                        chunk = resp.read(64 * 1024)
+                        if not chunk: break
+                        f.write(chunk)
+            os.replace(tmp, new_path)
+            msg.config(text=f"✅ 新版已下載：{filename}\n請關閉本工具，雙擊新 EXE 啟動",
+                       fg="#2e7d32")
+            btn_login.config(text="關閉", command=dlg.destroy, state="normal")
+            try: os.startfile(exe_dir)  # 開資料夾讓使用者看到新檔
+            except Exception: pass
+        except Exception as e:
+            msg.config(text=f"⚠ 下載失敗：{e}\n請改至 admin UI 手動下載", fg="#c62828")
+            btn_login.config(state="normal")
+        finally:
+            busy["v"] = False
+
     # 取消（左）+ 登入（右），登入按鈕隆重大顆
     tk.Button(btnf, text="取消", width=10, command=dlg.destroy,
               font=("Microsoft JhengHei", 12),
@@ -4092,7 +4138,56 @@ def show_password_gate(parent):
               relief="flat", bd=0, padx=22, pady=10, cursor="hand2")
     btn_login.pack(side="right")
     e1.focus()
-    dlg.bind("<Return>", lambda e: do_login())
+    dlg.bind("<Return>", lambda e: do_login() if not update_state["required"] else _do_force_update())
+
+    # v1.0.58 啟動時背景查 /version，偵測到新版 → 切強制更新模式
+    def _async_check_version():
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                CLOUD_AUTH_URL.rstrip("/") + "/version",
+                headers={"User-Agent": f"HIV-Auth-Client/{VERSION} (Windows)"},
+            )
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if not data.get("ok"):
+                dlg.after(0, lambda: latest_var.set("雲端版本：尚未上傳"))
+                return
+            latest = (data.get("latest") or "").strip()
+            if not latest:
+                return
+            cmp_ = _semver_compare(latest, VERSION)
+
+            def _apply_update_required():
+                latest_var.set(f"雲端版本：v{latest}  ⚠ 必須更新")
+                latest_lbl.config(fg="#c62828", font=("Consolas", 10, "bold"))
+                msg.config(text=f"⚠ 偵測到新版 v{latest}（你目前 v{VERSION}），必須先更新才能繼續使用。",
+                           fg="#c62828")
+                # 鎖密碼框、把按鈕變「立即更新」
+                e1.config(state="disabled")
+                update_state["required"] = True
+                update_state["latest"] = latest
+                update_state["filename"] = data.get("filename")
+                durl = data.get("download_url") or "/exe-download"
+                if not durl.startswith("http"):
+                    durl = CLOUD_AUTH_URL.rstrip("/") + durl
+                update_state["url"] = durl
+                btn_login.config(text="立即更新", command=_do_force_update,
+                                  bg="#c62828", activebackground="#8b0000")
+
+            def _apply_latest():
+                latest_var.set(f"雲端版本：v{latest}  ✓ 已是最新")
+                latest_lbl.config(fg="#2e7d32")
+
+            if cmp_ > 0:
+                dlg.after(0, _apply_update_required)
+            else:
+                dlg.after(0, _apply_latest)
+        except Exception:
+            # 連不上就不阻擋登入（離線寬限）
+            dlg.after(0, lambda: latest_var.set("雲端版本：— （無法連線）"))
+
+    threading.Thread(target=_async_check_version, daemon=True).start()
 
     dlg.update_idletasks()
     w = dlg.winfo_reqwidth()

@@ -306,6 +306,19 @@ async function handleAdminStats(request, env) {
             COUNT(DISTINCT NULLIF(hostname, '')) AS uniq_machine
      FROM audit WHERE ts >= datetime('now', '-7 days')`
   ).first();
+  // v1.0.58：累計使用的電腦數（不限時間）
+  const rAll = await env.DB.prepare(
+    `SELECT COUNT(DISTINCT NULLIF(hostname, '')) AS uniq_machine_all
+     FROM audit`
+  ).first();
+  // v1.0.58：7 天錯誤回報筆數
+  let err7 = 0;
+  try {
+    const re = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM error_reports WHERE ts >= datetime('now', '-7 days')`
+    ).first();
+    err7 = (re && re.n) || 0;
+  } catch { /* error_reports 表不存在就 0 */ }
   // top IPs（過去 7 天）
   const topIps = await env.DB.prepare(
     `SELECT ip, country,
@@ -321,6 +334,9 @@ async function handleAdminStats(request, env) {
     last_24h: r24 || {},
     last_7d: r7 || {},
     top_ips: topIps.results || [],
+    // v1.0.58 新增
+    machines_all: (rAll && rAll.uniq_machine_all) || 0,
+    error_reports_7d: err7,
   });
 }
 
@@ -1285,20 +1301,20 @@ const ADMIN_HTML = `<!doctype html>
           <div class="card-body">
             <div class="state-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));">
               <div class="state-cell">
-                <div class="k">今日使用</div>
+                <div class="k">今日登入</div>
                 <div class="v" style="font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums;"><span id="stat_today">—</span></div>
               </div>
               <div class="state-cell">
-                <div class="k">7 天成功</div>
-                <div class="v" style="font-size: 22px; font-weight: 700; color: var(--ok); font-variant-numeric: tabular-nums;"><span id="stat_week_ok">—</span></div>
+                <div class="k">今日已產生總筆數</div>
+                <div class="v" style="font-size: 22px; font-weight: 700; color: var(--ok); font-variant-numeric: tabular-nums;"><span id="stat_today_ok">—</span></div>
               </div>
               <div class="state-cell">
-                <div class="k">7 天失敗</div>
-                <div class="v" style="font-size: 22px; font-weight: 700; color: var(--bad); font-variant-numeric: tabular-nums;"><span id="stat_week_fail">—</span></div>
+                <div class="k">7 天錯誤回報</div>
+                <div class="v" style="font-size: 22px; font-weight: 700; color: var(--bad); font-variant-numeric: tabular-nums;"><span id="stat_err_7d">—</span></div>
               </div>
               <div class="state-cell">
-                <div class="k">7 天活躍機器</div>
-                <div class="v" style="font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums;"><span id="stat_unique_ip">—</span></div>
+                <div class="k">已使用電腦數</div>
+                <div class="v" style="font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums;"><span id="stat_machines_all">—</span></div>
               </div>
             </div>
           </div>
@@ -2253,11 +2269,11 @@ async function loadOverview(){
         const el = document.getElementById(id);
         if (el) el.textContent = (n == null ? 0 : n);
       };
-      setN('stat_today', r24.total);
-      setN('stat_week_ok', r7.ok_cnt);
-      setN('stat_week_fail', r7.fail_cnt);
-      // v1.0.56：「7 天活躍機器」改用 uniq_machine（COUNT DISTINCT hostname），fallback uniq_ip
-      setN('stat_unique_ip', r7.uniq_machine != null ? r7.uniq_machine : r7.uniq_ip);
+      // v1.0.58：4 stat 重新定義
+      setN('stat_today', r24.total);            // 今日登入：24h 全部嘗試
+      setN('stat_today_ok', r24.ok_cnt);        // 今日已產生總筆數：24h 成功登入（每次成功 ≈ 一個批次 session）
+      setN('stat_err_7d', s.error_reports_7d);  // 7 天錯誤回報：error_reports 表 7d
+      setN('stat_machines_all', s.machines_all); // 已使用電腦數：累計不同 hostname
     }
   } catch {}
   // v1.0.57：拉最新 EXE 版本資訊
