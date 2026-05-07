@@ -4188,137 +4188,157 @@ def show_password_gate(parent):
                 btn_login.config(**kw)
             except Exception: pass
 
+        # v1.1.6：徹底改架構 — bg thread 只負責跑 curl（subprocess.run 阻塞式），
+        # main thread 用 dlg.after 自己 poll 檔案大小算進度，UI 永遠不會卡。
+        # PyInstaller --windowed 模式 + Popen+PIPE 會死，所以全部 stdio 走 DEVNULL。
+        curl_state = {"done": False, "error": None, "rc": None, "stderr": ""}
+
         def _bg_download():
-            """v1.1.4 改用 Windows 內建 curl.exe（PyInstaller import urllib 在某些 PC
-            配 proxy/防火牆時會 hang 2+ 分鐘，curl 直接 winsock 無這問題）"""
             import time as _t, subprocess, shutil
-            t0 = _t.time()
             curl_exe = shutil.which("curl.exe") or r"C:\Windows\System32\curl.exe"
             if not os.path.exists(curl_exe):
-                spin_state["running"] = False
-                dlg.after(0, lambda: (
-                    _set_msg("⚠ 系統缺 curl.exe（需 Windows 10 1803+）\n請點下方重試。",
-                             "#c62828"),
-                    _set_btn("重新下載", cmd=_do_force_update,
-                             state="normal", bg="#c62828"),
-                ))
+                curl_state["error"] = "系統缺 curl.exe（需 Windows 10 1803+）"
                 return
-            expected_size = update_state.get("size") or 0
             try:
-                # 啟動 curl，不顯示進度條（我們自己 poll 檔案大小）
-                # -L 跟 redirect、-S 顯示 error、-s 安靜、--connect-timeout 連線秒數
-                # --max-time 整個下載最多秒數
-                proc = subprocess.Popen(
-                    [curl_exe, "-L", "-s", "-S",
-                     "-A", f"HIV-Auth-Client/{VERSION} (Windows)",
-                     "--connect-timeout", "10",
-                     "--max-time", "180",
-                     "-o", tmp,
-                     url],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    creationflags=0x08000000,  # CREATE_NO_WINDOW
-                )
-                # spinner 停掉，改成下載中
-                spin_state["running"] = False
-                mb_total = (expected_size // 1024 // 1024) if expected_size else 0
-                init_text = (f"⬇ 下載中 v{update_state['latest']} ({mb_total} MB)…"
-                             if mb_total else
-                             "⬇ 下載中新版本…")
-                dlg.after(0, lambda t=init_text: _set_msg(t, ACCENT))
-                # 每 200ms 用檔案大小算進度
-                while proc.poll() is None:
-                    try: cur = os.path.getsize(tmp) if os.path.exists(tmp) else 0
-                    except Exception: cur = 0
-                    elapsed = _t.time() - t0
-                    speed = cur / max(0.1, elapsed) / 1024 / 1024
-                    if expected_size:
-                        pct = cur / expected_size * 100
-                        text = f"⬇ 下載中 {pct:.0f}% ({cur//1024//1024}/{expected_size//1024//1024} MB · {speed:.1f} MB/s)"
-                        btn_text = f"下載中… {int(pct)}%"
-                    else:
-                        text = f"⬇ 下載中 {cur//1024//1024} MB ({speed:.1f} MB/s)"
-                        btn_text = f"下載中… {cur//1024//1024} MB"
-                    dlg.after(0, lambda t=text: _set_msg(t, ACCENT))
-                    dlg.after(0, lambda b=btn_text: _set_btn(b, state="disabled"))
-                    _t.sleep(0.2)
-                rc = proc.returncode
+                # stderr 寫到檔案才能讀（PIPE 在 PyInstaller windowed 會死）
+                err_path = tmp + ".err"
+                with open(err_path, "wb") as ef:
+                    rc = subprocess.run(
+                        [curl_exe, "-L", "-s", "-S", "-f",
+                         "-A", f"HIV-Auth-Client/{VERSION} (Windows)",
+                         "--connect-timeout", "10",
+                         "--max-time", "180",
+                         "-o", tmp,
+                         url],
+                        stdout=subprocess.DEVNULL,
+                        stderr=ef,
+                        stdin=subprocess.DEVNULL,
+                        creationflags=0x08000000,  # CREATE_NO_WINDOW
+                        timeout=200,
+                    ).returncode
+                curl_state["rc"] = rc
                 if rc != 0:
-                    err = proc.stderr.read().decode("utf-8", errors="ignore")[:120]
-                    raise RuntimeError(f"curl rc={rc} {err}")
-                if not os.path.exists(tmp) or os.path.getsize(tmp) < 30 * 1024 * 1024:
-                    raise RuntimeError(f"檔案大小異常 ({os.path.getsize(tmp) if os.path.exists(tmp) else 0} bytes)")
-                os.replace(tmp, new_path)
-
-                # v1.1.1：下載完 → 啟動新版 → 舊版自我 exit → 新版啟動後搬舊版到 old/
-                def _on_done():
-                    elapsed = _t.time() - t0
-                    _set_msg(f"✅ 新版 v{update_state['latest']} 已下載 ({elapsed:.1f}s)\n"
-                             f"3 秒後自動切換到新版…",
-                             "#2e7d32")
-                    _set_btn("3 秒後切換到新版", state="disabled", bg="#2e7d32")
-                    def _countdown(s):
-                        if s <= 0:
-                            _do_handoff()
-                            return
-                        _set_btn(f"{s} 秒後切換到新版")
-                        dlg.after(1000, lambda: _countdown(s - 1))
-                    dlg.after(1000, lambda: _countdown(3))
-
-                def _do_handoff():
-                    """啟動新版 EXE，自我 exit。新版的 _archive_older_exes 會 retry
-                    把舊版（我）搬到 old/。先驗證檔案 size 合理才切換，避免炸機"""
                     try:
-                        sz = os.path.getsize(new_path)
-                    except Exception:
-                        sz = 0
-                    if sz < 30 * 1024 * 1024:  # 新 EXE 應該 > 30MB
-                        _set_msg(f"⚠ 新版檔案異常（{sz} bytes）\n請點下方重試。",
-                                 "#c62828")
-                        _set_btn("重新下載", cmd=_do_force_update,
-                                 state="normal", bg="#c62828")
-                        return
-                    import subprocess
-                    try:
-                        DETACHED_PROCESS = 0x00000008
-                        CREATE_NEW_PROCESS_GROUP = 0x00000200
-                        subprocess.Popen(
-                            [new_path],
-                            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
-                            close_fds=True,
-                            cwd=exe_dir,
-                        )
-                    except Exception as e:
-                        _set_msg(f"⚠ 啟動新版失敗：{e}\n請手動雙擊新檔。",
-                                 "#c62828")
-                        _set_btn("關閉並開啟資料夾",
-                                 cmd=lambda: (os.startfile(exe_dir), dlg.destroy()),
-                                 state="normal", bg="#c62828")
-                        return
-                    # 新版已啟動 → 自我退出（result["ok"]=False 讓 main() 直接 sys.exit）
-                    _set_msg("新版已啟動，本工具即將關閉…", "#2e7d32")
-                    try:
-                        dlg.after(300, dlg.destroy)
-                        # 確保 mainloop 完整退出
-                        dlg.after(500, lambda: os._exit(0))
-                    except Exception:
-                        os._exit(0)
-
-                dlg.after(0, _on_done)
+                        with open(err_path, "rb") as ef:
+                            curl_state["stderr"] = ef.read().decode("utf-8", errors="ignore")[:160]
+                    except Exception: pass
+                    curl_state["error"] = f"curl rc={rc} {curl_state['stderr']}"
+                else:
+                    curl_state["done"] = True
+                try: os.remove(err_path)
+                except Exception: pass
+            except subprocess.TimeoutExpired:
+                curl_state["error"] = "下載超時 (200s)"
             except Exception as e:
-                err = str(e)[:80]
+                curl_state["error"] = f"{type(e).__name__}: {e}"
+
+        # main thread poll loop — 每 200ms 看檔案大小、判斷 curl 是否結束
+        expected_size = update_state.get("size") or 0
+        t0_main = [None]
+        def _poll_curl():
+            if t0_main[0] is None:
+                import time as _t
+                t0_main[0] = _t.time()
+            # 結束（成功）
+            if curl_state["done"]:
+                spin_state["running"] = False
+                if not os.path.exists(tmp) or os.path.getsize(tmp) < 30 * 1024 * 1024:
+                    sz = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+                    _set_msg(f"⚠ 檔案異常 ({sz} bytes)\n請點下方重試。", "#c62828")
+                    _set_btn("重新下載", cmd=_do_force_update,
+                             state="normal", bg="#c62828")
+                    busy["v"] = False
+                    return
+                try: os.replace(tmp, new_path)
+                except Exception as e:
+                    _set_msg(f"⚠ 重新命名失敗：{e}\n請點下方重試。", "#c62828")
+                    _set_btn("重新下載", cmd=_do_force_update,
+                             state="normal", bg="#c62828")
+                    busy["v"] = False
+                    return
+                import time as _t
+                elapsed = _t.time() - t0_main[0]
+                _set_msg(f"✅ 新版 v{update_state['latest']} 已下載 ({elapsed:.1f}s)\n"
+                         f"3 秒後自動切換到新版…", "#2e7d32")
+                _set_btn("3 秒後切換到新版", state="disabled", bg="#2e7d32")
+                def _countdown(s):
+                    if s <= 0:
+                        _do_handoff()
+                        return
+                    _set_btn(f"{s} 秒後切換到新版")
+                    dlg.after(1000, lambda: _countdown(s - 1))
+                dlg.after(1000, lambda: _countdown(3))
+                return
+            # 結束（失敗）
+            if curl_state["error"]:
+                spin_state["running"] = False
+                err = curl_state["error"][:120]
                 try: os.remove(tmp)
                 except Exception: pass
-                spin_state["running"] = False
-                dlg.after(0, lambda m=err: (
-                    _set_msg(f"⚠ 下載失敗：{m}\n請點下方重試。", "#c62828"),
-                    _set_btn("重新下載", cmd=_do_force_update,
-                             state="normal", bg="#c62828"),
-                ))
-            finally:
+                _set_msg(f"⚠ 下載失敗：{err}\n請點下方重試。", "#c62828")
+                _set_btn("重新下載", cmd=_do_force_update,
+                         state="normal", bg="#c62828")
                 busy["v"] = False
+                return
+            # 進度更新
+            try: cur = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+            except Exception: cur = 0
+            import time as _t
+            elapsed = _t.time() - t0_main[0]
+            if cur > 0:
+                # 檔案開始有內容 → 已連上，停 spinner、改顯示下載進度
                 spin_state["running"] = False
+                speed = cur / max(0.1, elapsed) / 1024 / 1024
+                if expected_size:
+                    pct = cur / expected_size * 100
+                    _set_msg(f"⬇ 下載中 {pct:.0f}% "
+                             f"({cur//1024//1024}/{expected_size//1024//1024} MB · {speed:.1f} MB/s)",
+                             ACCENT)
+                    _set_btn(f"下載中… {int(pct)}%", state="disabled")
+                else:
+                    _set_msg(f"⬇ 下載中 {cur//1024//1024} MB ({speed:.1f} MB/s)", ACCENT)
+                    _set_btn(f"下載中… {cur//1024//1024} MB", state="disabled")
+            # cur=0 時 spinner 繼續顯示「連線中…」（不主動修改 btn）
+            dlg.after(200, _poll_curl)
+
+        def _do_handoff():
+            """v1.1.1：啟動新版 EXE，自我 exit。新版的 _archive_older_exes 會 retry
+            把舊版（我）搬到 old/。"""
+            try:
+                sz = os.path.getsize(new_path)
+            except Exception:
+                sz = 0
+            if sz < 30 * 1024 * 1024:
+                _set_msg(f"⚠ 新版檔案異常（{sz} bytes）\n請點下方重試。", "#c62828")
+                _set_btn("重新下載", cmd=_do_force_update,
+                         state="normal", bg="#c62828")
+                busy["v"] = False
+                return
+            import subprocess
+            try:
+                DETACHED_PROCESS = 0x00000008
+                CREATE_NEW_PROCESS_GROUP = 0x00000200
+                subprocess.Popen(
+                    [new_path],
+                    creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                    close_fds=True,
+                    cwd=exe_dir,
+                )
+            except Exception as e:
+                _set_msg(f"⚠ 啟動新版失敗：{e}\n請手動雙擊新檔。", "#c62828")
+                _set_btn("關閉並開啟資料夾",
+                         cmd=lambda: (os.startfile(exe_dir), dlg.destroy()),
+                         state="normal", bg="#c62828")
+                return
+            _set_msg("新版已啟動，本工具即將關閉…", "#2e7d32")
+            try:
+                dlg.after(300, dlg.destroy)
+                dlg.after(500, lambda: os._exit(0))
+            except Exception:
+                os._exit(0)
 
         threading.Thread(target=_bg_download, daemon=True).start()
+        dlg.after(200, _poll_curl)
 
     # 取消（左）+ 登入（右），登入按鈕隆重大顆
     # v1.1.2：強制更新模式會把「取消」整顆移除（不讓使用者跳過）
