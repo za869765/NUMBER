@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.51"
+VERSION = "1.0.52"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -2704,9 +2704,9 @@ class App:
                     self._current_xlsx_path = today_full
                     self._existing_rows = []
             wb = Workbook()
-            # v1.0.35：主分頁「全部」+ 路徑分頁
+            # v1.0.52：單一分頁，名稱用今天日期；不再依風險路徑拆分頁
             ws = wb.active
-            ws.title = "全部"
+            ws.title = datetime.datetime.now().strftime("%Y-%m-%d")
             ws.append(OUTPUT_HEADERS)
             # 收集每筆內容（既存 + 新）並依路徑分流
             all_rows = []           # [(content, path)]
@@ -2761,31 +2761,8 @@ class App:
                 col_letter = ws.cell(1, col_idx).column_letter
                 ws.column_dimensions[col_letter].width = 16
             ws.freeze_panes = "F2"  # 凍結 # / 代碼 / 時間 / 路徑 / 摘要 + 標題列
-
-            # v1.0.35 拆 sheet：依路徑各開分頁（同樣 51 欄）
-            for path_name in ("簡單", "性行為", "感染史", "藥物史"):
-                rows_for_path = [c for c, p in all_rows if p == path_name]
-                if not rows_for_path:
-                    continue
-                ws_p = wb.create_sheet(path_name)
-                ws_p.append(OUTPUT_HEADERS)
-                # 重編號
-                for i, content in enumerate(rows_for_path, 1):
-                    cc = list(content); cc[0] = i
-                    ws_p.append(cc)
-                for c in ws_p[1]:
-                    c.font = Font(bold=True, color="FFFFFF", size=10)
-                    c.fill = PatternFill("solid", fgColor="1565C0")
-                    c.alignment = Alignment(horizontal="center", vertical="center")
-                ws_p.column_dimensions["A"].width = 5
-                ws_p.column_dimensions["B"].width = 12
-                ws_p.column_dimensions["C"].width = 20
-                ws_p.column_dimensions["D"].width = 10
-                ws_p.column_dimensions["E"].width = 8
-                for col_idx in range(6, len(OUTPUT_HEADERS) + 1):
-                    col_letter = ws_p.cell(1, col_idx).column_letter
-                    ws_p.column_dimensions[col_letter].width = 16
-                ws_p.freeze_panes = "F2"
+            # v1.0.52：移除原本依風險路徑拆 sheet 的邏輯（簡單/性行為/感染史/藥物史）
+            #         只留單一日期分頁，整體更乾淨；列上仍會依路徑套淡色背景作區分
             self._save_xlsx_atomic(wb, self._current_xlsx_path)
         except Exception as e:
             self.log(f"⚠ 寫 Excel 失敗：{e}")
