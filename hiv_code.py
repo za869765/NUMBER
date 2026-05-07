@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -4577,6 +4577,13 @@ def main():
         except Exception:
             pass
 
+        # v1.2.0：archive 提前到 password gate 之前的背景 thread。
+        # 之前寫在 gate 之後 → 使用者還沒登入時舊 EXE 不會被搬走（自動更新切版後最常見的場景）
+        try:
+            threading.Thread(target=_archive_older_exes, args=(None,),
+                             daemon=True).start()
+        except Exception: pass
+
         if not show_password_gate(root):
             root.destroy()
             sys.exit(0)
@@ -4586,13 +4593,6 @@ def main():
         app._update_counts()
         app.log(f"📁 log 寫入：{log_path}")
         app.log(f"📁 輸出資料夾：{OUTPUT_DIR}")
-
-        # v1.0.62/1.1.1：啟動時把同層比自己舊的 HIV*.exe 搬到 old/（自動更新後清乾淨）
-        # 跑在背景 thread 因為要重試 5s 等舊版釋放檔案 lock，不擋主畫面
-        try:
-            threading.Thread(target=_archive_older_exes, args=(app.log,),
-                             daemon=True).start()
-        except Exception: pass
 
         # v1.0.55：背景檢查更新（thread-safe log 透過 root.after 切回主執行緒）
         def _safe_log(msg):
