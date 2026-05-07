@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.52"
+VERSION = "1.0.53"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -681,6 +681,16 @@ def ensure_outdir():
         p = os.path.join(OUTPUT_DIR, sub)
         os.makedirs(p, exist_ok=True)
         _hide_path(p)
+    # v1.0.53：啟動時掃一次，把其他輔助檔藏起來（不留東西在 EXE 旁邊礙眼）
+    #           僅 EXE + 諮詢代碼.xlsx 是「使用者要看到的」
+    for fname in ("settings.json", "resume_state.json"):
+        p = os.path.join(OUTPUT_DIR, fname)
+        if os.path.isfile(p):
+            _hide_path(p)
+    if os.path.isfile(SETTINGS_FILE):
+        _hide_path(SETTINGS_FILE)
+    # 舊版（v1.0.52 之前）的 *_HIV_CODE.xlsx 累積在主目錄會礙眼
+    # 不直接搬（資料寶貴），僅在沒「諮詢代碼.xlsx」時 archive_old_outputs 會搬
 
 # ── 全域 log file（每次啟動 GUI 開新檔） ──
 _LOG_FP = None
@@ -709,7 +719,8 @@ def debug_dir():
 
 def archive_old_outputs(log_fn=None):
     """把 number/ 下「非今天」的 *.xlsx / *.csv 搬到 number/old/。
-       v1.0.17：保留今天的檔案以便同日合併（merge 邏輯在 _incremental_save_excel）"""
+       v1.0.17：保留今天的檔案以便同日合併（merge 邏輯在 _incremental_save_excel）
+       v1.0.53：新檔名「諮詢代碼.xlsx」是固定持久檔，多日多分頁；不再 archive 它"""
     old_dir = os.path.join(OUTPUT_DIR, "old")
     os.makedirs(old_dir, exist_ok=True)
     today = datetime.datetime.now().strftime("%Y%m%d")
@@ -723,6 +734,9 @@ def archive_old_outputs(log_fn=None):
                 continue
             # v1.0.36：今天的 HIV_CODE 檔留下供同日合併
             if fn == f"{today}_HIV_CODE.xlsx":
+                continue
+            # v1.0.53：固定檔名「諮詢代碼.xlsx」永久保留（多日多分頁累積）
+            if fn == "諮詢代碼.xlsx" or fn.startswith("諮詢代碼") and fn.endswith(".xlsx"):
                 continue
             try:
                 import shutil
@@ -2452,7 +2466,49 @@ class App:
             self.log_box.insert("end", line + "\n", tag)
             self.log_box.see("end")
         except Exception:
-            pass
+            tag = None
+        # v1.0.53：嚴重紅色錯誤自動上報雲端（每 session 限一次，避免洗版）
+        if tag == "error":
+            try: self._maybe_report_error(msg)
+            except Exception: pass
+
+    def _maybe_report_error(self, trigger_msg):
+        """v1.0.53：紅色 error log 觸發 → 把 log_box 內容打包 POST 到
+        cloud_auth /report-error，由 Worker 存進 D1（並可選擇寄 email）。
+        每 session 只發一次，避免錯誤連環觸發大量上報。"""
+        if getattr(self, "_error_reported", False):
+            return
+        self._error_reported = True
+        try:
+            log_text = self.log_box.get("1.0", "end")
+        except Exception:
+            log_text = trigger_msg or ""
+        # 截最後 60KB（最近的訊息較重要；Worker 端再額外保險到 100KB）
+        if len(log_text) > 60000:
+            log_text = log_text[-60000:]
+
+        def _bg():
+            import urllib.request, urllib.error
+            try:
+                body = json.dumps({
+                    "version": VERSION,
+                    "trigger": (trigger_msg or "")[:200],
+                    "log_text": log_text,
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    CLOUD_AUTH_URL.rstrip("/") + "/report-error",
+                    data=body,
+                    headers={
+                        "Content-Type": "application/json;charset=utf-8",
+                        "User-Agent": f"HIV-Auth-Client/{VERSION} (Windows)",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    resp.read()
+            except Exception:
+                pass  # 上報失敗不影響主流程
+        threading.Thread(target=_bg, daemon=True).start()
 
     @staticmethod
     def _classify_log(msg):
@@ -2679,34 +2735,47 @@ class App:
         try:
             ensure_outdir()
             if not self._current_xlsx_path:
-                today = datetime.datetime.now().strftime("%Y%m%d")
-                # v1.0.36：固定用「日期_HIV_CODE.xlsx」，同日唯一檔案
-                today_fname = f"{today}_HIV_CODE.xlsx"
-                today_full = os.path.join(OUTPUT_DIR, today_fname)
+                # v1.0.53：固定檔名「諮詢代碼.xlsx」，多日多分頁；
+                # 同日繼續取號 → 寫入今天日期的 sheet（合併既有列）
+                # 跨日 → 新建今天日期的 sheet（其他日期 sheet 不動）
+                # 沒檔案 → 全新檔
+                xlsx_fname = "諮詢代碼.xlsx"
+                xlsx_full = os.path.join(OUTPUT_DIR, xlsx_fname)
+                today_sheet = datetime.datetime.now().strftime("%Y-%m-%d")
                 self._existing_rows = []
-                if os.path.isfile(today_full):
+                self._current_xlsx_path = xlsx_full
+                if os.path.isfile(xlsx_full):
                     try:
-                        wb_old = load_workbook(today_full)
-                        ws_old = wb_old.active
-                        old_all = list(ws_old.iter_rows(values_only=True))
-                        if old_all:
-                            old_headers = list(old_all[0])
-                            old_rows = [r for r in old_all[1:] if any(c not in (None, "") for c in r)]
-                            self._existing_rows = _normalize_existing(old_rows, old_headers)
-                        self._current_xlsx_path = today_full
-                        self.log(f"📁 偵測到同日舊檔 {today_fname}（{len(self._existing_rows)} 筆），將合併寫入")
+                        wb_old = load_workbook(xlsx_full)
+                        if today_sheet in wb_old.sheetnames:
+                            ws_old = wb_old[today_sheet]
+                            old_all = list(ws_old.iter_rows(values_only=True))
+                            if old_all:
+                                old_headers = list(old_all[0])
+                                old_rows = [r for r in old_all[1:]
+                                             if any(c not in (None, "") for c in r)]
+                                self._existing_rows = _normalize_existing(old_rows, old_headers)
+                            self.log(f"📁 諮詢代碼.xlsx 已有今天分頁（{len(self._existing_rows)} 筆），將合併寫入")
+                        else:
+                            self.log(f"📁 諮詢代碼.xlsx 已存在但今天 ({today_sheet}) 還沒分頁，將新增")
                     except Exception as e:
-                        self.log(f"⚠ 讀取同日舊檔失敗，改開新檔：{e}")
+                        self.log(f"⚠ 讀取諮詢代碼.xlsx 失敗，改開新檔：{e}")
                         self._existing_rows = []
-                        self._current_xlsx_path = None
-                if not self._current_xlsx_path:
+                else:
                     archive_old_outputs(self.log)
-                    self._current_xlsx_path = today_full
-                    self._existing_rows = []
-            wb = Workbook()
-            # v1.0.52：單一分頁，名稱用今天日期；不再依風險路徑拆分頁
-            ws = wb.active
-            ws.title = datetime.datetime.now().strftime("%Y-%m-%d")
+                    self.log("📁 諮詢代碼.xlsx 不存在，將建立新檔")
+            # v1.0.53：固定檔多日多分頁；今天分頁永遠排在第一頁
+            today_sheet = datetime.datetime.now().strftime("%Y-%m-%d")
+            if os.path.isfile(self._current_xlsx_path):
+                wb = load_workbook(self._current_xlsx_path)
+                if today_sheet in wb.sheetnames:
+                    del wb[today_sheet]
+                ws = wb.create_sheet(today_sheet, 0)  # index 0 = 第一頁
+            else:
+                wb = Workbook()
+                ws = wb.active
+                ws.title = today_sheet
+            wb.active = 0
             ws.append(OUTPUT_HEADERS)
             # 收集每筆內容（既存 + 新）並依路徑分流
             all_rows = []           # [(content, path)]

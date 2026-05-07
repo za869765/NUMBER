@@ -44,6 +44,16 @@ export default {
       if (path === '/admin/audit/daily' && request.method === 'POST') {
         return await handleAdminDaily(request, env);
       }
+      // v1.0.53 錯誤回報相關
+      if (path === '/report-error' && request.method === 'POST') {
+        return await handleReportError(request, env);
+      }
+      if (path === '/admin/error-reports' && request.method === 'POST') {
+        return await handleAdminErrorReports(request, env);
+      }
+      if (path === '/admin/error-reports/clear' && request.method === 'POST') {
+        return await handleAdminErrorReportsClear(request, env);
+      }
       if (path === '/' || path === '/health') {
         return new Response('hiv-auth ok', { status: 200 });
       }
@@ -325,6 +335,117 @@ async function handleAdminDaily(request, env) {
     .bind(`-${days} days`)
     .all();
   return jsonReply({ ok: true, days, rows: r.results || [] });
+}
+
+// ── v1.0.53 EXE 錯誤回報 ───────────────────────
+// EXE 偵測到紅色 log 自動 POST 上報；無需 admin 密碼（任意 EXE 均可發），
+// 但走 IP rate-limit（每 10 分鐘最多 5 筆）防 abuse。
+// 若有設 RESEND_API_KEY 環境變數則同時寄 email 到 ALERT_EMAIL（預設 za869765@gmail.com）。
+async function isErrorReportRateLimited(env, ip) {
+  if (!ip) return false;
+  try {
+    const r = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM error_reports
+       WHERE ip = ?1 AND ts >= datetime('now', '-10 minute')`
+    ).bind(ip).first();
+    return ((r && r.n) || 0) >= 5;
+  } catch {
+    return false;
+  }
+}
+
+async function handleReportError(request, env) {
+  const ip = request.headers.get('cf-connecting-ip') || '';
+  if (await isErrorReportRateLimited(env, ip)) {
+    return jsonReply({ ok: false, reason: '上報太頻繁，請稍後' }, 429);
+  }
+  let body;
+  try { body = await request.json(); }
+  catch { return jsonReply({ ok: false, reason: '格式錯誤' }, 400); }
+
+  let log_text = String((body && body.log_text) || '');
+  if (!log_text) {
+    return jsonReply({ ok: false, reason: '缺 log_text' }, 400);
+  }
+  // 100KB 上限，超過取後半段（最近的訊息較重要）
+  const MAX = 100000;
+  if (log_text.length > MAX) log_text = log_text.slice(-MAX);
+  const trigger = String((body && body.trigger) || '').slice(0, 200);
+  const version = String((body && body.version) || '').slice(0, 32);
+  const ua = (request.headers.get('user-agent') || '').slice(0, 200);
+  const country = (request.cf && request.cf.country) ||
+                   request.headers.get('cf-ipcountry') || '';
+  const ts = new Date().toISOString();
+
+  try {
+    await env.DB.prepare(
+      `INSERT INTO error_reports (ts, ip, country, ua, version, trigger, log_text)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`
+    ).bind(ts, ip, country, ua, version, trigger, log_text).run();
+  } catch (e) {
+    return jsonReply({ ok: false, reason: '儲存失敗' }, 500);
+  }
+
+  // 寄 email（若有設 RESEND_API_KEY 與 ALERT_EMAIL）
+  let emailed = false;
+  if (env.RESEND_API_KEY) {
+    const to = env.ALERT_EMAIL || 'za869765@gmail.com';
+    try {
+      const resp = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + env.RESEND_API_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: 'onboarding@resend.dev',
+          to,
+          subject: '[諮詢代碼工具] 錯誤回報 v' + version,
+          text:
+            '時間: ' + ts + '\n' +
+            'IP: ' + ip + ' (' + country + ')\n' +
+            '版本: ' + version + '\n' +
+            'UA: ' + ua + '\n' +
+            '觸發訊息:\n' + trigger + '\n\n' +
+            '=== Log（最後 100KB） ===\n' + log_text,
+        }),
+      });
+      emailed = resp.ok;
+    } catch {}
+  }
+  return jsonReply({ ok: true, emailed });
+}
+
+async function handleAdminErrorReports(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await checkAdmin(body.admin_pwd, env))) {
+    return jsonReply({ ok: false, reason: '管理員密碼錯誤' }, 401);
+  }
+  const limit = Math.min(200, Math.max(10, parseInt(body.limit, 10) || 50));
+  const r = await env.DB.prepare(
+    `SELECT id, ts, ip, country, ua, version, trigger, log_text
+     FROM error_reports ORDER BY id DESC LIMIT ?1`
+  ).bind(limit).all();
+  return jsonReply({ ok: true, rows: r.results || [] });
+}
+
+async function handleAdminErrorReportsClear(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await checkAdmin(body.admin_pwd, env))) {
+    return jsonReply({ ok: false, reason: '管理員密碼錯誤' }, 401);
+  }
+  const days = parseInt(body.older_than_days, 10);
+  if (isNaN(days) || days < 0) {
+    return jsonReply({ ok: false, reason: '天數無效' }, 400);
+  }
+  if (days > 0) {
+    const r = await env.DB.prepare(
+      `DELETE FROM error_reports WHERE ts < datetime('now', ?1)`
+    ).bind('-' + days + ' days').run();
+    return jsonReply({ ok: true, msg: '已清掉 ' + days + ' 天前的紀錄', meta: r.meta });
+  }
+  const r = await env.DB.prepare(`DELETE FROM error_reports`).run();
+  return jsonReply({ ok: true, msg: '全部紀錄已清空', meta: r.meta });
 }
 
 // ── 管理員：清空 audit ───────────────────────
@@ -1049,6 +1170,10 @@ const ADMIN_HTML = `<!doctype html>
           <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="2" width="10" height="12" rx="1"/><path d="M5.5 6h5M5.5 8.5h5M5.5 11h3"/></svg>
           活動紀錄
         </a>
+        <a href="#sec-errors">
+          <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="6"/><path d="M8 5v3.5M8 11v.1"/></svg>
+          錯誤回報
+        </a>
       </nav>
 
       <div class="sidebar-footer">
@@ -1288,6 +1413,55 @@ const ADMIN_HTML = `<!doctype html>
           </div>
         </div>
       </section>
+
+      <!-- ===== 錯誤回報 (v1.0.53) ===== -->
+      <section class="section" id="sec-errors">
+        <div class="section-head">
+          <h2 class="section-title">錯誤回報</h2>
+          <span class="section-sub">EXE 偵測紅色錯誤時自動上傳的 log</span>
+        </div>
+
+        <div class="card">
+          <div class="card-body">
+            <div class="filter-row">
+              <select id="error_limit" onchange="loadErrors()">
+                <option value="20">最近 20 筆</option>
+                <option value="50" selected>最近 50 筆</option>
+                <option value="100">最近 100 筆</option>
+                <option value="200">最近 200 筆</option>
+              </select>
+              <button class="btn ghost sm" onclick="loadErrors()">重新整理</button>
+              <span class="spacer"></span>
+              <span class="clear-block">
+                清掉
+                <input id="error_clear_days" type="number" value="30" min="0" max="365">
+                天前（0 = 全清）
+                <button class="btn danger sm" onclick="clearErrors()" id="btn_err_clear">清除</button>
+              </span>
+            </div>
+            <div class="scroll">
+              <table id="error_table">
+                <thead>
+                  <tr>
+                    <th style="width:140px">時間</th>
+                    <th style="width:60px">版本</th>
+                    <th style="width:120px">IP</th>
+                    <th>觸發訊息</th>
+                    <th style="width:80px">log</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p style="margin-top:10px;font-size:11.5px;color:var(--ink-3);line-height:1.55">
+              💡 寄 email 到 za869765@gmail.com 需要設定 <code class="mono">RESEND_API_KEY</code>：
+              註冊 <a href="https://resend.com" target="_blank">resend.com</a>（免費 3000/月）→
+              <code class="mono">npx wrangler secret put RESEND_API_KEY</code>。
+              未設定時錯誤仍會收進此表，admin UI 看得到。
+            </p>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
 </div>
@@ -1471,6 +1645,7 @@ async function login(){
     renderState(r.state);
     loadDaily(true);
     loadAudit();
+    loadErrors();  // v1.0.53
   } finally {
     btn.disabled = false;
     btn.innerHTML = prev;
@@ -1616,6 +1791,64 @@ window.clearAudit = withLoading('btn_clear', async function(){
   loadAudit();
 });
 
+// ── v1.0.53 錯誤回報 ────────────────────────
+async function loadErrors(){
+  const limit = parseInt(document.getElementById('error_limit').value, 10);
+  const r = await api('/admin/error-reports', { admin_pwd: ADM, limit });
+  if (!r.ok) return toast(r.reason || '失敗', 'err');
+  const tb = document.querySelector('#error_table tbody');
+  tb.innerHTML = '';
+  if (!r.rows.length){
+    tb.innerHTML = '<tr class="empty-row"><td colspan="5">沒有錯誤回報，全綠</td></tr>';
+    return;
+  }
+  for (const row of r.rows){
+    const tr = document.createElement('tr');
+    const trigger = (row.trigger || '').replace(/</g, '&lt;');
+    tr.innerHTML =
+      '<td class="ts">' + fmt(row.ts) + '</td>' +
+      '<td class="mono">' + (row.version || '—') + '</td>' +
+      '<td class="ip">' + (row.ip || '—') + '</td>' +
+      '<td title="' + trigger + '">' + (trigger.length > 80 ? trigger.slice(0, 80) + '…' : trigger) + '</td>' +
+      '<td><button class="btn ghost tiny" onclick="window.viewErrorLog(' + row.id + ')">查看</button></td>';
+    tb.appendChild(tr);
+    // 把整個 row data 留著供查看用
+    tr.dataset.logText = row.log_text || '';
+    tr.dataset.ts = row.ts || '';
+    tr.dataset.version = row.version || '';
+    tr.dataset.ua = row.ua || '';
+    tr.dataset.country = row.country || '';
+  }
+  // 暴露 viewErrorLog
+  window.viewErrorLog = function(id){
+    const tr = [...document.querySelectorAll('#error_table tbody tr')]
+      .find(tr => tr.querySelector('button[onclick*="viewErrorLog(' + id + ')"]'));
+    if (!tr) return;
+    const text = tr.dataset.logText || '(無內容)';
+    const meta = '時間 ' + fmt(tr.dataset.ts) + '\\n版本 ' + tr.dataset.version +
+                 '\\nUA ' + tr.dataset.ua + '\\n地區 ' + tr.dataset.country + '\\n\\n';
+    // 開新視窗顯示
+    const w = window.open('', '_blank', 'width=900,height=600');
+    if (!w) return toast('彈窗被擋了，請允許彈窗', 'err');
+    w.document.title = '錯誤 log #' + id;
+    const pre = w.document.createElement('pre');
+    pre.style.cssText = 'font:12px ui-monospace,Consolas,monospace;background:#14181f;color:#c4cbd6;padding:16px;margin:0;white-space:pre-wrap;word-break:break-word;min-height:100vh';
+    pre.textContent = meta + text;
+    w.document.body.style.margin = '0';
+    w.document.body.appendChild(pre);
+  };
+}
+
+window.clearErrors = withLoading('btn_err_clear', async function(){
+  const n = parseInt(document.getElementById('error_clear_days').value, 10);
+  if (isNaN(n) || n < 0) return toast('請輸入 0 或以上的數字', 'err');
+  if (!confirm(n === 0 ? '確定全部清光所有錯誤回報？' : '確定清掉 ' + n + ' 天前的錯誤？')) return;
+  const r = await api('/admin/error-reports/clear', { admin_pwd: ADM, older_than_days: n });
+  if (!r.ok) return toast(r.reason || '失敗', 'err');
+  toast(r.msg || '已清除', 'ok');
+  loadErrors();
+});
+
 async function loadState(){
   const r = await api('/admin/state', { admin_pwd: ADM });
   if (!r.ok) return toast(r.reason || '失敗', 'err');
@@ -1749,7 +1982,7 @@ document.getElementById('adm').addEventListener('keydown', e => {
     });
   });
   // Update active link based on viewport position
-  const sections = ['sec-overview','sec-passwords','sec-service','sec-usage','sec-audit'];
+  const sections = ['sec-overview','sec-passwords','sec-service','sec-usage','sec-audit','sec-errors'];
   let ticking = false;
   function update(){
     ticking = false;
