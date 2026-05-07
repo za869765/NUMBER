@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.62"
+VERSION = "1.1.0"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -4141,38 +4141,91 @@ def show_password_gate(parent):
     btnf = tk.Frame(frm, bg=BG)
     btnf.pack(fill="x", pady=(28, 0))
 
-    # v1.0.58 強制更新處理：偵測新版時把「登入」改成「立即更新」
+    # v1.0.58/v1.1.0 強制更新處理：背景 thread 下載 + 進度顯示
     def _do_force_update():
         if busy["v"]: return
         busy["v"] = True
-        btn_login.config(state="disabled", text="下載中…")
-        msg.config(text="🌐 正在下載新版 EXE，下載完請關閉本工具切換新版…", fg=ACCENT)
+        btn_login.config(state="disabled", text="準備中…")
+        msg.config(text="🌐 連線下載新版 EXE…", fg=ACCENT)
         dlg.update_idletasks()
-        import urllib.request
-        try:
-            url = update_state["url"]
-            filename = update_state["filename"] or f"HIV取號_v{update_state['latest']}.exe"
-            exe_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
-                      else os.path.dirname(os.path.abspath(__file__))
-            new_path = os.path.join(exe_dir, filename)
-            tmp = new_path + ".downloading"
-            with urllib.request.urlopen(url, timeout=120) as resp:
-                with open(tmp, "wb") as f:
-                    while True:
-                        chunk = resp.read(64 * 1024)
-                        if not chunk: break
-                        f.write(chunk)
-            os.replace(tmp, new_path)
-            msg.config(text=f"✅ 新版已下載：{filename}\n請關閉本工具，雙擊新 EXE 啟動",
-                       fg="#2e7d32")
-            btn_login.config(text="關閉", command=dlg.destroy, state="normal")
-            try: os.startfile(exe_dir)  # 開資料夾讓使用者看到新檔
+
+        url = update_state["url"]
+        filename = update_state["filename"] or f"HIV取號_v{update_state['latest']}.exe"
+        exe_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+                  else os.path.dirname(os.path.abspath(__file__))
+        new_path = os.path.join(exe_dir, filename)
+        tmp = new_path + ".downloading"
+
+        def _set_msg(text, color=None):
+            try:
+                msg.config(text=text)
+                if color: msg.config(fg=color)
             except Exception: pass
-        except Exception as e:
-            msg.config(text=f"⚠ 下載失敗：{e}\n請改至 admin UI 手動下載", fg="#c62828")
-            btn_login.config(state="normal")
-        finally:
-            busy["v"] = False
+
+        def _set_btn(text, cmd=None, state="normal", bg=None):
+            try:
+                kw = {"text": text, "state": state}
+                if cmd: kw["command"] = cmd
+                if bg: kw["bg"] = bg
+                btn_login.config(**kw)
+            except Exception: pass
+
+        def _bg_download():
+            import urllib.request, time as _t
+            t0 = _t.time()
+            try:
+                req2 = urllib.request.Request(
+                    url, headers={"User-Agent": f"HIV-Auth-Client/{VERSION} (Windows)"},
+                )
+                with urllib.request.urlopen(req2, timeout=120) as resp:
+                    total = 0
+                    try: total = int(resp.headers.get("Content-Length", 0))
+                    except Exception: total = 0
+                    received = 0
+                    last_ui = 0
+                    with open(tmp, "wb") as f:
+                        while True:
+                            chunk = resp.read(64 * 1024)
+                            if not chunk: break
+                            f.write(chunk)
+                            received += len(chunk)
+                            # 每 200ms 才更新 UI 一次（避免狂打）
+                            now = _t.time()
+                            if now - last_ui > 0.2 or not chunk:
+                                last_ui = now
+                                if total:
+                                    pct = received / total * 100
+                                    speed = received / max(0.1, now - t0) / 1024 / 1024
+                                    text = f"⬇ 下載中 {pct:.0f}% ({received//1024//1024}/{total//1024//1024} MB · {speed:.1f} MB/s)"
+                                else:
+                                    text = f"⬇ 下載中 {received//1024//1024} MB"
+                                dlg.after(0, lambda t=text: _set_msg(t, ACCENT))
+                                dlg.after(0, lambda p=int(received / max(1, total) * 100):
+                                              _set_btn(f"下載中… {p}%", state="disabled"))
+                os.replace(tmp, new_path)
+
+                # 完成
+                def _on_done():
+                    elapsed = _t.time() - t0
+                    _set_msg(f"✅ 新版 v{update_state['latest']} 已下載 ({elapsed:.1f}s)\n"
+                             f"請關閉本工具，雙擊「{filename}」啟動",
+                             "#2e7d32")
+                    _set_btn("關閉本工具", cmd=dlg.destroy, state="normal", bg="#2e7d32")
+                    try: os.startfile(exe_dir)
+                    except Exception: pass
+                dlg.after(0, _on_done)
+            except Exception as e:
+                err = str(e)[:80]
+                try: os.remove(tmp)
+                except Exception: pass
+                dlg.after(0, lambda m=err: (
+                    _set_msg(f"⚠ 下載失敗：{m}\n請改至 admin UI 手動下載", "#c62828"),
+                    _set_btn("立即更新", cmd=_do_force_update, state="normal", bg="#c62828"),
+                ))
+            finally:
+                busy["v"] = False
+
+        threading.Thread(target=_bg_download, daemon=True).start()
 
     # 取消（左）+ 登入（右），登入按鈕隆重大顆
     tk.Button(btnf, text="取消", width=10, command=dlg.destroy,
@@ -4195,18 +4248,38 @@ def show_password_gate(parent):
     check_state = {"done": False, "elapsed": 0, "result": None}
 
     def _async_check_version():
+        """v1.1.0：兩階段檢查，最壞 3.5s 內必有結果
+        1) socket TCP 連通測試（1.5s）：先確認 worker host:443 通
+        2) HTTP GET /version（2s）：拉 manifest
+        任一階段 fail → check_state.result 立刻寫 error，主 thread 1s 內感知"""
         import urllib.request, socket
-        socket.setdefaulttimeout(3)
+        from urllib.parse import urlparse
+        try:
+            u = urlparse(CLOUD_AUTH_URL)
+            host = u.hostname
+            port = 443 if (u.scheme or "https") == "https" else 80
+        except Exception:
+            check_state["result"] = ("error", "URL 解析失敗")
+            return
+        # Stage 1: socket TCP 連通測試（含 DNS 解析 + TCP handshake）
+        try:
+            s = socket.create_connection((host, port), timeout=1.5)
+            s.close()
+        except Exception as e:
+            check_state["result"] = ("error", f"連線失敗：{type(e).__name__}")
+            return
+        # Stage 2: HTTP fetch
+        socket.setdefaulttimeout(2)
         try:
             req = urllib.request.Request(
                 CLOUD_AUTH_URL.rstrip("/") + "/version",
                 headers={"User-Agent": f"HIV-Auth-Client/{VERSION} (Windows)"},
             )
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with urllib.request.urlopen(req, timeout=2) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             check_state["result"] = ("ok", data)
         except Exception as e:
-            check_state["result"] = ("error", str(e)[:60])
+            check_state["result"] = ("error", f"HTTP 錯誤：{type(e).__name__}")
         finally:
             try: socket.setdefaulttimeout(None)
             except Exception: pass
