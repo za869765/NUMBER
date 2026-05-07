@@ -735,12 +735,23 @@ const ADMIN_HTML = `<!doctype html>
 
   /* ============ Section / card ============ */
   .section{
-    margin-bottom: 32px;
+    margin-bottom: 14px;
     scroll-margin-top: 24px;
   }
+  /* v1.0.55 accordion：section-head 變成可點 toggle，預設縮起 */
   .section-head{
     display: flex; align-items: center; gap: 10px;
-    margin-bottom: 12px;
+    padding: 12px 16px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    cursor: pointer;
+    user-select: none;
+    transition: background .15s, box-shadow .15s;
+  }
+  .section-head:hover{
+    background: var(--surface-2);
   }
   .section-title{
     font-size: 14px; font-weight: 600; margin: 0;
@@ -750,6 +761,20 @@ const ADMIN_HTML = `<!doctype html>
   .section-sub{
     font-size: 12px; color: var(--ink-3);
     margin-left: 2px;
+  }
+  .section-toggle{
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--ink-3);
+    transition: transform .2s;
+  }
+  .section.collapsed .section-toggle{
+    transform: rotate(-90deg);
+  }
+  /* 不需 wrapper：所有 section-head 之後的兄弟元素都吃 collapsed display:none */
+  .section > * + * { margin-top: 10px; }
+  .section.collapsed > *:not(.section-head){
+    display: none;
   }
 
   .card{
@@ -1179,6 +1204,30 @@ const ADMIN_HTML = `<!doctype html>
           <h2 class="section-title">目前狀態</h2>
           <span class="section-sub">所有 EXE 共用此設定</span>
         </div>
+        <!-- v1.0.55 數字儀表板 -->
+        <div class="card">
+          <div class="card-body">
+            <div class="state-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));">
+              <div class="state-cell">
+                <div class="k">今日使用</div>
+                <div class="v" style="font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums;"><span id="stat_today">—</span></div>
+              </div>
+              <div class="state-cell">
+                <div class="k">7 天成功</div>
+                <div class="v" style="font-size: 22px; font-weight: 700; color: var(--ok); font-variant-numeric: tabular-nums;"><span id="stat_week_ok">—</span></div>
+              </div>
+              <div class="state-cell">
+                <div class="k">7 天失敗</div>
+                <div class="v" style="font-size: 22px; font-weight: 700; color: var(--bad); font-variant-numeric: tabular-nums;"><span id="stat_week_fail">—</span></div>
+              </div>
+              <div class="state-cell">
+                <div class="k">7 天活躍機器</div>
+                <div class="v" style="font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums;"><span id="stat_unique_ip">—</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- 設定狀態 -->
         <div class="card">
           <div class="card-body">
             <div class="state-grid">
@@ -1204,6 +1253,28 @@ const ADMIN_HTML = `<!doctype html>
                 <div class="k">停用訊息（顯示給被擋下的使用者）</div>
                 <div class="v" id="s_msg" style="color: var(--ink-2); font-size: 13px;">—</div>
               </div>
+            </div>
+          </div>
+        </div>
+        <!-- 最近活動預覽（前 5 筆） -->
+        <div class="card">
+          <div class="card-header">
+            <h3>最近活動</h3>
+            <span class="help">前 5 筆登入嘗試 — 完整列表見「活動紀錄」</span>
+          </div>
+          <div class="card-body" style="padding: 0;">
+            <div class="scroll" style="max-height: 240px; border: 0; border-radius: 0;">
+              <table id="overview_recent_table">
+                <thead>
+                  <tr>
+                    <th style="width: 140px;">時間</th>
+                    <th style="width: 70px;">結果</th>
+                    <th style="width: 130px;">IP</th>
+                    <th>原因</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
             </div>
           </div>
         </div>
@@ -1620,9 +1691,8 @@ async function login(){
     document.getElementById('login_card').classList.add('hidden');
     document.getElementById('main_card').classList.remove('hidden');
     renderState(r.state);
-    loadDaily(true);
-    loadAudit();
-    loadErrors();  // v1.0.53
+    loadOverview();  // v1.0.55 預設只展 overview，先把它的 stat + recent 拉好
+    // 其他 section 預設收合，使用者點開時才會 load
   } finally {
     btn.disabled = false;
     btn.innerHTML = prev;
@@ -1958,23 +2028,60 @@ document.getElementById('adm').addEventListener('keydown', e => {
   if (e.key === 'Enter') login();
 });
 
-// Sidebar nav active-state on scroll + click
+// v1.0.55 Accordion + Sidebar nav
 (function setupNav(){
+  const sections = ['sec-overview','sec-passwords','sec-service','sec-usage','sec-audit','sec-errors'];
   const links = document.querySelectorAll('.nav a[href^="#"]');
+
+  // 給每個 section-head 加 ▾ icon + click toggle
+  document.querySelectorAll('.section').forEach(sec => {
+    const head = sec.querySelector('.section-head');
+    if (!head) return;
+    if (!head.querySelector('.section-toggle')){
+      const ic = document.createElement('span');
+      ic.className = 'section-toggle';
+      ic.textContent = '▾';
+      head.appendChild(ic);
+    }
+    head.addEventListener('click', () => {
+      sec.classList.toggle('collapsed');
+      // 展開時對應 section 內容若是延遲載的，這裡觸發
+      if (!sec.classList.contains('collapsed')){
+        if (sec.id === 'sec-overview') loadOverview();
+        else if (sec.id === 'sec-usage') loadDaily(true);
+        else if (sec.id === 'sec-audit') loadAudit();
+        else if (sec.id === 'sec-errors') loadErrors();
+      }
+    });
+  });
+
+  // 預設只展開 sec-overview，其他全收合
+  sections.forEach(id => {
+    const el = document.getElementById(id);
+    if (el && id !== 'sec-overview') el.classList.add('collapsed');
+  });
+
+  // 側邊 nav：點 link 展開目標 + scroll
   links.forEach(a => {
     a.addEventListener('click', e => {
       const id = a.getAttribute('href').slice(1);
       const target = document.getElementById(id);
       if (target){
         e.preventDefault();
+        target.classList.remove('collapsed');
         target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        // 觸發對應的延遲載入
+        if (id === 'sec-overview') loadOverview();
+        else if (id === 'sec-usage') loadDaily(true);
+        else if (id === 'sec-audit') loadAudit();
+        else if (id === 'sec-errors') loadErrors();
         links.forEach(l => l.classList.remove('active'));
         a.classList.add('active');
       }
     });
   });
-  // Update active link based on viewport position
-  const sections = ['sec-overview','sec-passwords','sec-service','sec-usage','sec-audit','sec-errors'];
+
+  // 滾動更新 active link
   let ticking = false;
   function update(){
     ticking = false;
@@ -1993,6 +2100,50 @@ document.getElementById('adm').addEventListener('keydown', e => {
     if (!ticking){ requestAnimationFrame(update); ticking = true; }
   }, { passive: true });
 })();
+
+// v1.0.55 目前狀態 dashboard：拉統計數字 + 最近 5 筆活動
+async function loadOverview(){
+  if (!ADM) return;
+  // stats
+  try {
+    const s = await api('/admin/audit/stats', { admin_pwd: ADM });
+    if (s && s.ok){
+      const r24 = s.last_24h || {};
+      const r7 = s.last_7d || {};
+      const setN = (id, n) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = (n == null ? 0 : n);
+      };
+      setN('stat_today', r24.total);
+      setN('stat_week_ok', r7.ok_cnt);
+      setN('stat_week_fail', r7.fail_cnt);
+      setN('stat_unique_ip', r7.uniq_ip);
+    }
+  } catch {}
+  // 最近 5 筆活動
+  try {
+    const a = await api('/admin/audit', { admin_pwd: ADM, limit: 5, filter: 'all' });
+    const tb = document.querySelector('#overview_recent_table tbody');
+    if (!tb) return;
+    tb.innerHTML = '';
+    if (!a || !a.ok || !a.rows || !a.rows.length){
+      tb.innerHTML = '<tr class="empty-row"><td colspan="4">尚無紀錄</td></tr>';
+      return;
+    }
+    for (const row of a.rows){
+      const tr = document.createElement('tr');
+      const okPill = row.ok
+        ? '<span class="pill ok"><span class="dot"></span>成功</span>'
+        : '<span class="pill bad"><span class="dot"></span>失敗</span>';
+      tr.innerHTML =
+        '<td class="ts">' + fmt(row.ts) + '</td>' +
+        '<td>' + okPill + '</td>' +
+        '<td class="ip">' + (row.ip || '—') + '</td>' +
+        '<td>' + (row.reason || '') + '</td>';
+      tb.appendChild(tr);
+    }
+  } catch {}
+}
 </script>
 </body>
 </html>
