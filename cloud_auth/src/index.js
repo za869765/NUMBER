@@ -1605,7 +1605,7 @@ async function loadAudit(){
   }
 }
 
-const clearAudit = withLoading('btn_clear', async function(){
+window.clearAudit = withLoading('btn_clear', async function(){
   const n = parseInt(document.getElementById('audit_clear_days').value, 10);
   if (isNaN(n) || n < 0) return toast('請輸入 0 或以上的數字', 'err');
   if (!confirm(n === 0 ? '確定全部清光所有紀錄？' : '確定清掉 ' + n + ' 天前的紀錄？')) return;
@@ -1680,7 +1680,7 @@ function renderState(s){
   document.getElementById('msg').value = s.message || '';
 }
 
-const setPwd = withLoading('btn_setpwd', async function(){
+window.setPwd = withLoading('btn_setpwd', async function(){
   const v = document.getElementById('newpwd').value;
   if (!v || v.length < 4) return toast('密碼至少 4 字', 'err');
   const r = await api('/admin/update', { admin_pwd: ADM, action: 'set_password', value: v });
@@ -1690,7 +1690,7 @@ const setPwd = withLoading('btn_setpwd', async function(){
   loadState();
 });
 
-const setAdminPwd = withLoading('btn_setadm', async function(){
+window.setAdminPwd = withLoading('btn_setadm', async function(){
   const v = document.getElementById('new_admin_pwd').value;
   if (!v || v.length < 4) return toast('密碼至少 4 字', 'err');
   const masked = '•'.repeat(v.length) + ' (' + v.length + ' 字)';
@@ -1703,7 +1703,7 @@ const setAdminPwd = withLoading('btn_setadm', async function(){
   loadState();
 });
 
-const setMsg = withLoading('btn_setmsg', async function(){
+window.setMsg = withLoading('btn_setmsg', async function(){
   const v = document.getElementById('msg').value;
   const r = await api('/admin/update', { admin_pwd: ADM, action: 'set_message', value: v });
   if (!r.ok) return toast(r.reason || '失敗', 'err');
