@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.50"
+VERSION = "1.0.51"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -616,6 +616,53 @@ class CanvasProgressBar(tk.Canvas):
         self.itemconfigure(self._runner_items['body'], fill=fg)
         self.itemconfigure(self._runner_items['back_leg'], fill=self._fg_2)
         self.itemconfigure(self._runner_items['front_leg'], fill=self._fg_2)
+
+    # ── v1.0.51 跑者狀態（Claude Design 概念稿 3.6）──
+    # state: 'idle' | 'running' | 'arrived' | 'panting'
+    # idle  → 清空 overlay，靜止
+    # running → 已由 configure_value 自動處理（跳動）
+    # arrived → 🎉 + confetti 1.5s 後自動回 idle
+    # panting → 💦 持續顯示，下次 set_state 才清
+    def set_state(self, state):
+        # 先清掉之前的 overlay
+        if not hasattr(self, '_overlay_items'):
+            self._overlay_items = []
+        for item in self._overlay_items:
+            try: self.delete(item)
+            except Exception: pass
+        self._overlay_items = []
+        if not hasattr(self, '_arrival_after'):
+            self._arrival_after = None
+        if self._arrival_after:
+            try: self.after_cancel(self._arrival_after)
+            except Exception: pass
+            self._arrival_after = None
+
+        if state == 'arrived':
+            cx, by = self._runner_cx, self._runner_by
+            # 🎉 emoji 在跑者頭上方
+            tid = self.create_text(cx, by - 38, text="🎉",
+                                    font=("Segoe UI Emoji", 14))
+            self._overlay_items.append(tid)
+            # 撒花：8 顆小色塊散落跑者周圍
+            import random
+            colors = ["#5b8def", "#d97a8a", "#5fa787", "#c39145", "#6c5ce7", "#0fa3a3"]
+            for _ in range(8):
+                ox = random.randint(-30, 30)
+                oy = random.randint(-32, -8)
+                cc = random.choice(colors)
+                rx, ry = cx + ox, by + oy
+                rid = self.create_rectangle(rx, ry, rx + 3, ry + 4,
+                                             fill=cc, outline="")
+                self._overlay_items.append(rid)
+            # 1.5 秒後自動回 idle
+            self._arrival_after = self.after(1500, lambda: self.set_state('idle'))
+        elif state == 'panting':
+            cx, by = self._runner_cx, self._runner_by
+            tid = self.create_text(cx + 10, by - 38, text="💦",
+                                    font=("Segoe UI Emoji", 12))
+            self._overlay_items.append(tid)
+        # idle / running 不需 overlay（已清掉）
 
 # ── 工具函式 ──────────────────────────────────────
 def _hide_path(path):
@@ -2011,12 +2058,11 @@ class App:
         ttk.Label(log_btns, text="（儲存 Log 會將目前畫面內容存成 .txt，方便回報修正）",
                   foreground="#666").pack(side="left", padx=12)
 
-        # ── v1.0.45 免責聲明 / v1.0.47 雙欄：左版本+build、右免責聲明 ──
+        # ── v1.0.45 免責聲明 / v1.0.51 兩欄：左版本、右免責聲明（拿掉 build 日期）──
         disclaimer_fr = ttk.Frame(self.root)
         disclaimer_fr.pack(fill="x", padx=14, pady=(0, 6))
-        build_date = datetime.datetime.now().strftime("%Y.%m.%d")
         ttk.Label(disclaimer_fr,
-                  text=f"v{VERSION} · build {build_date}",
+                  text=f"v{VERSION}",
                   foreground="#9e9e9e",
                   font=("Consolas", 9)).pack(side="left")
         ttk.Label(disclaimer_fr,
@@ -2275,36 +2321,91 @@ class App:
             self.single_simple_fr.pack(fill="both", expand=True)
 
     def _make_city_block(self, title, parent=None):
-        fr = ttk.LabelFrame(parent or self.root, text=title + " （調一個，其他自動平衡到 100%）")
-        fr.pack(fill="x", padx=6, pady=4)
-        rows_holder = ttk.Frame(fr)
-        rows_holder.pack(fill="x", padx=4, pady=2)
+        """v1.0.51 dashboard 卡片版（與 _make_pct_block 同節奏）：
+        Header（標題 + 添加按鈕）→ 水平堆疊比例條 → 動態列（●+Combobox+%+✕）
+        城市色階：青色系（Claude Design 概念稿 居住地 #0fa3a3 / #5cc4c4 / #a8dede）
+        rows 結構保留 [(StringVar, IntVar, Frame), ...]，外部 _balance_city 不用改。"""
+        palette = ["#0fa3a3", "#5cc4c4", "#a8dede", "#cfeaea", "#e8f4f4"]
+
+        card = ttk.Frame(parent or self.root, padding=(12, 8))
+        card.pack(fill="x", padx=6, pady=4)
+
+        # Header
+        header = ttk.Frame(card)
+        header.pack(fill="x")
+        ttk.Label(header, text=title, font=("微軟正黑體", 11, "bold")).pack(side="left")
+        sum_var = tk.StringVar(value="")
+        ttk.Label(header, textvariable=sum_var, font=("Consolas", 9)).pack(side="right", padx=(0, 6))
+
+        # 水平堆疊比例條
+        bar = tk.Canvas(card, height=8, bg="#eef1f5", highlightthickness=0, bd=0)
+        bar.pack(fill="x", pady=(6, 6))
+
+        rows_holder = ttk.Frame(card)
+        rows_holder.pack(fill="x")
         rows = []
+
+        def redraw_bar(*_a):
+            try:
+                bar.delete("all")
+                w = bar.winfo_width()
+                if w <= 1:
+                    return
+                x = 0
+                total_pct = 0
+                for i, (cv, pv, _) in enumerate(rows):
+                    try: total_pct += pv.get()
+                    except Exception: pass
+                for i, (cv, pv, _) in enumerate(rows):
+                    try: p = max(0, pv.get())
+                    except Exception: p = 0
+                    seg_w = w * p / 100.0
+                    if seg_w > 0:
+                        c = palette[i % len(palette)]
+                        bar.create_rectangle(x, 0, x + seg_w, 8, fill=c, outline="")
+                        x += seg_w
+                if total_pct == 100:
+                    sum_var.set("")
+                else:
+                    sum_var.set(f"⚠ ∑ {total_pct}%")
+            except Exception:
+                pass
+
+        bar.bind("<Configure>", redraw_bar)
 
         def add_row(city="台南市", pct=100):
             row_fr = ttk.Frame(rows_holder)
             row_fr.pack(fill="x", pady=1)
             cv = tk.StringVar(value=city)
             pv = tk.IntVar(value=pct)
+            # 色點（依目前 row 索引取 palette 色）
+            idx = len(rows)
+            c = palette[idx % len(palette)]
+            ttk.Label(row_fr, text="●", foreground=c, font=("微軟正黑體", 10)).pack(side="left", padx=(0, 4))
             cb = ttk.Combobox(row_fr, textvariable=cv, values=CITIES, width=12, state="readonly")
             cb.pack(side="left", padx=2)
-            self._mk_int_entry(row_fr, pv, width=6).pack(side="left", padx=2)
-            ttk.Label(row_fr, text="%").pack(side="left")
+            self._mk_int_entry(row_fr, pv, width=5, justify="center").pack(side="left", padx=2)
+            ttk.Label(row_fr, text="%").pack(side="left", padx=(0, 8))
             def remove():
                 row_fr.destroy()
                 rows.remove(item)
-                # 移除後重新平衡（讓剩下總和為 100）
                 if rows and not self._balancing:
                     self._balance_city(rows, rows[0][1])
                 self._update_counts()
+                redraw_bar()
             ttk.Button(row_fr, text="✕", width=3, command=remove).pack(side="left", padx=4)
             item = (cv, pv, row_fr)
             rows.append(item)
-            # 綁 trace
-            pv.trace_add("write", lambda *a, _pv=pv, _rows=rows: self._balance_city(_rows, _pv))
+            pv.trace_add("write", lambda *a, _pv=pv, _rows=rows:
+                         (self._balance_city(_rows, _pv), redraw_bar()))
+            cv.trace_add("write", lambda *a: redraw_bar())
+            redraw_bar()
 
-        ttk.Button(fr, text="＋ 添加縣市", command=lambda: add_row("台北市", 0)).pack(anchor="w", padx=4, pady=2)
+        # 添加按鈕
+        ttk.Button(header, text="＋ 添加縣市", command=lambda: add_row("台北市", 0)).pack(side="right", padx=(0, 8))
+
         add_row("台南市", 100)
+        card.after(50, redraw_bar)
         return rows
 
     def _apply_speed_preset(self, *_):
@@ -3289,6 +3390,9 @@ class App:
             self.pause_btn.config(state="disabled")
         except Exception:
             pass
+        # v1.0.51 跑者切「喘氣」狀態
+        try: self.pb.set_state('panting')
+        except Exception: pass
 
     def toggle_pause(self):
         """暫停/繼續：每筆任務開頭/中段都會檢查 pause_evt，被 set 即進入忙等迴圈"""
@@ -3296,10 +3400,15 @@ class App:
             self.pause_evt.clear()
             self.pause_btn.config(text="⏸ 暫停")
             self.log("▶ 已繼續")
+            # v1.0.51 清掉跑者喘氣 overlay，讓奔跑動畫接手
+            try: self.pb.set_state('idle')
+            except Exception: pass
         else:
             self.pause_evt.set()
             self.pause_btn.config(text="▶ 繼續")
             self.log("⏸ 已暫停（按「繼續」恢復）")
+            try: self.pb.set_state('panting')
+            except Exception: pass
 
     # ── v1.0.12 設定持久化 ──
     def _collect_settings(self):
@@ -3552,6 +3661,14 @@ class App:
         self.pause_btn.config(state="disabled", text="⏸ 暫停")
         self._stop_spinner()
         self._set_settings_locked(False)  # v1.0.21 解鎖
+        # v1.0.51 跑者抵達歡呼或正常結束
+        try:
+            if self.results and self.pb.value >= self.pb.maximum:
+                self.pb.set_state('arrived')
+            else:
+                self.pb.set_state('idle')
+        except Exception:
+            pass
         try:
             if "尚未取號" in self.single_result_var.get() or "執行中" in self.single_result_var.get():
                 if not self.results:
