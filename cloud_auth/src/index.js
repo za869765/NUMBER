@@ -333,12 +333,22 @@ async function handleAdminStats(request, env) {
   } catch { /* error_reports 表不存在就 0 */ }
   // v1.0.59：今天精確產生代碼數（從 batches 表 SUM count）
   let todayCodes = 0;
+  let todayCodesByHost = [];
   try {
     const rb = await env.DB.prepare(
       `SELECT IFNULL(SUM(count), 0) AS n FROM batches
        WHERE ts >= datetime('now', '-1 day')`
     ).first();
     todayCodes = (rb && rb.n) || 0;
+    // v1.1.4：每台電腦 24h 產出明細，給「今日已產生總筆數」tooltip 用
+    const rbh = await env.DB.prepare(
+      `SELECT hostname, IFNULL(SUM(count), 0) AS n, COUNT(*) AS batch_cnt
+       FROM batches
+       WHERE ts >= datetime('now', '-1 day')
+       GROUP BY hostname
+       ORDER BY n DESC LIMIT 8`
+    ).all();
+    todayCodesByHost = rbh.results || [];
   } catch { /* batches 表不存在就 0 */ }
   // top IPs（過去 7 天）
   const topIps = await env.DB.prepare(
@@ -367,6 +377,7 @@ async function handleAdminStats(request, env) {
     machines_all: (rAll && rAll.uniq_machine_all) || 0,
     error_reports_7d: err7,
     today_codes: todayCodes,
+    today_codes_by_host: todayCodesByHost,  // v1.1.4
   }), { headers });
 }
 
@@ -2603,11 +2614,18 @@ async function loadOverview(){
         '失敗     ' + (r24.fail_cnt || 0) + '\\n' +
         '使用 IP 數    ' + (r24.uniq_ip || 0) + '\\n' +
         '使用電腦數   ' + (r24.uniq_machine || 0));
+      // v1.1.4：「今日已產生總筆數」tooltip 顯示每台電腦 24h 產出明細
+      const codesList = (s.today_codes_by_host || [])
+        .map(function(h){
+          return '  • ' + (h.hostname || '?') + '：' + (h.n || 0)
+                 + ' 代碼 (' + (h.batch_cnt || 0) + ' 批)';
+        })
+        .join('\\n');
       setTitle('cell_today_ok',
-        '24 小時內所有 EXE 批次完成累計產生的諮詢代碼總數\\n' +
+        '24 小時內各台電腦完成的批次總和（明細）\\n' +
         '─────────────────\\n' +
-        '由 EXE 批次結束時上報 /report-batch 累加\\n' +
-        '至「電腦清單」分頁可看每台累計與最後批次時間');
+        (codesList || '（24h 內尚無批次）') + '\\n' +
+        '\\n至「電腦清單」分頁看完整累計與時間');
       setTitle('cell_err_7d',
         '7 天 error_reports 累計\\n' +
         'EXE 偵測紅色錯誤 log 自動上傳，至「錯誤回報」分頁看完整內容');

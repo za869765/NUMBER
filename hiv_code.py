@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -4142,12 +4142,30 @@ def show_password_gate(parent):
     btnf.pack(fill="x", pady=(28, 0))
 
     # v1.0.58/v1.1.0 強制更新處理：背景 thread 下載 + 進度顯示
+    spin_state = {"i": 0, "running": False, "phase": "connect"}
+    def _spin_tick():
+        if not spin_state["running"]:
+            return
+        chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        c = chars[spin_state["i"] % len(chars)]
+        spin_state["i"] += 1
+        elapsed = spin_state["i"] // 10  # 100ms tick → 1s
+        if spin_state["phase"] == "connect":
+            try: btn_login.config(text=f"{c} 連線中… ({elapsed}s)")
+            except Exception: pass
+        try: dlg.after(100, _spin_tick)
+        except Exception: pass
+
     def _do_force_update():
         if busy["v"]: return
         busy["v"] = True
-        btn_login.config(state="disabled", text="準備中…")
+        spin_state["running"] = True
+        spin_state["i"] = 0
+        spin_state["phase"] = "connect"
+        btn_login.config(state="disabled", text="⠋ 連線中… (0s)")
         msg.config(text="🌐 連線下載新版 EXE…", fg=ACCENT)
         dlg.update_idletasks()
+        dlg.after(100, _spin_tick)
 
         url = update_state["url"]
         filename = update_state["filename"] or f"HIV取號_v{update_state['latest']}.exe"
@@ -4174,15 +4192,22 @@ def show_password_gate(parent):
             import urllib.request, time as _t
             t0 = _t.time()
             try:
-                req2 = urllib.request.Request(
-                    url, headers={"User-Agent": f"HIV-Auth-Client/{VERSION} (Windows)"},
-                )
-                with urllib.request.urlopen(req2, timeout=120) as resp:
+                # v1.1.4：強制不走系統 proxy（衛生所常設了死 proxy 導致 urllib hang 2+ 分鐘）
+                # PowerShell 跟 IE 預設都不會走，但 Python urllib 會讀 Windows registry
+                no_proxy = urllib.request.ProxyHandler({})
+                opener = urllib.request.build_opener(no_proxy,
+                                                     urllib.request.HTTPSHandler())
+                opener.addheaders = [
+                    ("User-Agent", f"HIV-Auth-Client/{VERSION} (Windows)"),
+                ]
+                # v1.1.4：timeout 120→15，proxy bypass 後若還卡 15 秒就確定有事
+                with opener.open(url, timeout=15) as resp:
                     total = 0
                     try: total = int(resp.headers.get("Content-Length", 0))
                     except Exception: total = 0
                     # v1.1.2：urlopen 一回來就立刻把按鈕從「準備中」改成「下載中…」
                     # 確保使用者看得到狀態變化，而不是一直停在準備中
+                    spin_state["running"] = False  # 停 spinner
                     mb = total // 1024 // 1024 if total else 0
                     init_text = (f"⬇ 已連上，正在下載 v{update_state['latest']} "
                                  f"({mb} MB)…" if mb else
@@ -4271,6 +4296,7 @@ def show_password_gate(parent):
                 err = str(e)[:80]
                 try: os.remove(tmp)
                 except Exception: pass
+                spin_state["running"] = False
                 dlg.after(0, lambda m=err: (
                     _set_msg(f"⚠ 下載失敗：{m}\n請點下方重試。", "#c62828"),
                     _set_btn("重新下載", cmd=_do_force_update,
@@ -4278,6 +4304,7 @@ def show_password_gate(parent):
                 ))
             finally:
                 busy["v"] = False
+                spin_state["running"] = False
 
         threading.Thread(target=_bg_download, daemon=True).start()
 
@@ -4367,7 +4394,15 @@ def show_password_gate(parent):
                               bg="#c62828", activebackground="#8b0000")
             try: btn_cancel.pack_forget()
             except Exception: pass
+            # v1.1.4：取消鈕拿掉之後，立即更新鈕重新 pack 成填滿寬度（置中視覺）
+            try:
+                btn_login.pack_forget()
+                btn_login.pack(fill="x", padx=4, ipady=4)
+            except Exception: pass
             dlg.protocol("WM_DELETE_WINDOW", lambda: os._exit(0))
+            # v1.1.4：偵測到必須更新就自動下載，不用使用者點按鈕
+            # 800 ms 延遲讓使用者看清楚「⚠ 必須更新」訊息再開始
+            dlg.after(800, _do_force_update)
         else:
             latest_var.set(f"雲端版本：v{latest}  ✓ 已是最新")
             latest_lbl.config(fg="#2e7d32")
