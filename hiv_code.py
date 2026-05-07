@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -4204,15 +4204,59 @@ def show_password_gate(parent):
                                               _set_btn(f"下載中… {p}%", state="disabled"))
                 os.replace(tmp, new_path)
 
-                # 完成
+                # v1.1.1：下載完 → 啟動新版 → 舊版自我 exit → 新版啟動後搬舊版到 old/
                 def _on_done():
                     elapsed = _t.time() - t0
                     _set_msg(f"✅ 新版 v{update_state['latest']} 已下載 ({elapsed:.1f}s)\n"
-                             f"請關閉本工具，雙擊「{filename}」啟動",
+                             f"3 秒後自動切換到新版…",
                              "#2e7d32")
-                    _set_btn("關閉本工具", cmd=dlg.destroy, state="normal", bg="#2e7d32")
-                    try: os.startfile(exe_dir)
-                    except Exception: pass
+                    _set_btn("3 秒後切換到新版", state="disabled", bg="#2e7d32")
+                    def _countdown(s):
+                        if s <= 0:
+                            _do_handoff()
+                            return
+                        _set_btn(f"{s} 秒後切換到新版")
+                        dlg.after(1000, lambda: _countdown(s - 1))
+                    dlg.after(1000, lambda: _countdown(3))
+
+                def _do_handoff():
+                    """啟動新版 EXE，自我 exit。新版的 _archive_older_exes 會 retry
+                    把舊版（我）搬到 old/。先驗證檔案 size 合理才切換，避免炸機"""
+                    try:
+                        sz = os.path.getsize(new_path)
+                    except Exception:
+                        sz = 0
+                    if sz < 30 * 1024 * 1024:  # 新 EXE 應該 > 30MB
+                        _set_msg(f"⚠ 新版檔案大小異常（{sz} bytes）\n保留舊版可繼續使用，"
+                                  f"請改至 admin UI 手動下載", "#c62828")
+                        _set_btn("關閉", cmd=dlg.destroy, state="normal", bg="#c62828")
+                        return
+                    import subprocess
+                    try:
+                        DETACHED_PROCESS = 0x00000008
+                        CREATE_NEW_PROCESS_GROUP = 0x00000200
+                        subprocess.Popen(
+                            [new_path],
+                            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                            close_fds=True,
+                            cwd=exe_dir,
+                        )
+                    except Exception as e:
+                        _set_msg(f"⚠ 啟動新版失敗：{e}\n舊版仍可用，請手動雙擊新檔",
+                                 "#c62828")
+                        _set_btn("關閉", cmd=dlg.destroy, state="normal", bg="#c62828")
+                        try: os.startfile(exe_dir)
+                        except Exception: pass
+                        return
+                    # 新版已啟動 → 自我退出（result["ok"]=False 讓 main() 直接 sys.exit）
+                    _set_msg("新版已啟動，本工具即將關閉…", "#2e7d32")
+                    try:
+                        dlg.after(300, dlg.destroy)
+                        # 確保 mainloop 完整退出
+                        dlg.after(500, lambda: os._exit(0))
+                    except Exception:
+                        os._exit(0)
+
                 dlg.after(0, _on_done)
             except Exception as e:
                 err = str(e)[:80]
@@ -4378,11 +4422,12 @@ def _crash_log(exc_text):
 
 
 def _archive_older_exes(log_callback=None):
-    """v1.0.62：啟動時掃同層的 HIV*.exe，比自己舊的搬到 old/
-    自動更新後使用者下次跑新 EXE 啟動，舊版就被歸檔；不再留在桌面礙眼"""
+    """v1.0.62/1.1.1：啟動時掃同層的 HIV*.exe，比自己舊的搬到 old/
+    v1.1.1 加重試 5 秒：自動更新切換時，舊版剛 exit 但 Windows 可能還鎖著檔案，
+                       每 0.5s 重試一次，最多 10 次。"""
     if not getattr(sys, "frozen", False):
-        return  # 開發 .py 模式跳過
-    import re, shutil
+        return
+    import re, shutil, time as _time
     exe_dir = os.path.dirname(sys.executable)
     self_path = os.path.abspath(sys.executable)
     old_dir = os.path.join(exe_dir, "old")
@@ -4393,14 +4438,14 @@ def _archive_older_exes(log_callback=None):
         pass
 
     pattern = re.compile(r'_v(\d+)\.(\d+)\.(\d+)\.exe$', re.IGNORECASE)
-    moved = []
+    candidates = []
     try:
         for fname in os.listdir(exe_dir):
             full = os.path.join(exe_dir, fname)
             if not os.path.isfile(full):
                 continue
             if os.path.abspath(full) == self_path:
-                continue  # 自己跳過
+                continue
             if not fname.lower().endswith(".exe"):
                 continue
             if not fname.startswith("HIV"):
@@ -4410,19 +4455,29 @@ def _archive_older_exes(log_callback=None):
                 continue
             ver = f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
             if _semver_compare(ver, VERSION) >= 0:
-                continue  # 同版本或更新（保留）
-            try:
-                target = os.path.join(old_dir, fname)
-                if os.path.exists(target):
-                    stem, ext = os.path.splitext(fname)
-                    target = os.path.join(old_dir,
-                        f"{stem}_{datetime.datetime.now().strftime('%H%M%S')}{ext}")
-                shutil.move(full, target)
-                moved.append((fname, ver))
-            except Exception:
-                pass  # 檔案被鎖等問題，下次再試
+                continue
+            candidates.append((fname, full, ver))
     except Exception:
         return
+
+    moved = []
+    for fname, full, ver in candidates:
+        target = os.path.join(old_dir, fname)
+        if os.path.exists(target):
+            stem, ext = os.path.splitext(fname)
+            target = os.path.join(old_dir,
+                f"{stem}_{datetime.datetime.now().strftime('%H%M%S')}{ext}")
+        # 重試 5 秒等舊 EXE process 釋放檔案 lock
+        for retry in range(10):
+            try:
+                shutil.move(full, target)
+                moved.append((fname, ver))
+                break
+            except (PermissionError, OSError):
+                if retry < 9:
+                    _time.sleep(0.5)
+            except Exception:
+                break
     if log_callback:
         for fname, ver in moved:
             try: log_callback(f"📦 舊版 v{ver} 已歸檔 → old\\{fname}")
@@ -4449,8 +4504,11 @@ def main():
         app.log(f"📁 log 寫入：{log_path}")
         app.log(f"📁 輸出資料夾：{OUTPUT_DIR}")
 
-        # v1.0.62：啟動時把同層比自己舊的 HIV*.exe 搬到 old/（自動更新後清乾淨）
-        try: _archive_older_exes(app.log)
+        # v1.0.62/1.1.1：啟動時把同層比自己舊的 HIV*.exe 搬到 old/（自動更新後清乾淨）
+        # 跑在背景 thread 因為要重試 5s 等舊版釋放檔案 lock，不擋主畫面
+        try:
+            threading.Thread(target=_archive_older_exes, args=(app.log,),
+                             daemon=True).start()
         except Exception: pass
 
         # v1.0.55：背景檢查更新（thread-safe log 透過 root.after 切回主執行緒）
