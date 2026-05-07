@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "init-db": "wrangler d1 execute hiv-auth-db --remote --file=migrations/0001_init.sql"
+    "migrate": "wrangler d1 migrations apply hiv-auth-db --remote",
+    "migrate:local": "wrangler d1 migrations apply hiv-auth-db --local",
+    "init-db": "wrangler d1 migrations apply hiv-auth-db --remote"
   },
   "devDependencies": {
     "wrangler": "^4.88.0"

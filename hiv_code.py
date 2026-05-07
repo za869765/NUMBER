@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.42"
+VERSION = "1.0.43"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -2629,8 +2629,10 @@ class App:
                 "mode": self.mode_var.get(),
             }
             ensure_outdir()
-            with open(os.path.join(OUTPUT_DIR, "resume_state.json"), "w", encoding="utf-8") as f:
+            rs_path = os.path.join(OUTPUT_DIR, "resume_state.json")
+            with open(rs_path, "w", encoding="utf-8") as f:
                 json.dump(state, f, ensure_ascii=False, indent=2, default=str)
+            _hide_path(rs_path)  # v1.0.43 L4：與 settings.json 一致
         except Exception:
             pass
 
@@ -3199,8 +3201,10 @@ class App:
                         "xlsx_path": self._current_xlsx_path,
                         "mode": self.mode_var.get(),
                     }
-                    with open(os.path.join(OUTPUT_DIR, "resume_state.json"), "w", encoding="utf-8") as f:
+                    rs_path2 = os.path.join(OUTPUT_DIR, "resume_state.json")
+                    with open(rs_path2, "w", encoding="utf-8") as f:
                         json.dump(rs_state, f, ensure_ascii=False, indent=2, default=str)
+                    _hide_path(rs_path2)  # v1.0.43 L4
                     self.log(f"💾 已寫入續傳檔（剩 {len(self._current_pool) - self._completed_index} 筆）")
                 except Exception as e:
                     self.log(f"⚠ 續傳檔寫入失敗：{e}")
@@ -3257,36 +3261,53 @@ class App:
 # 管理員可在 cloud_auth/admin 改密碼或停用所有 EXE。
 def cloud_verify(password):
     """回傳 (ok: bool, reason: str)。reason 直接顯示給使用者。
-    v1.0.41：加 User-Agent，繞過 Cloudflare 對 Python-urllib 的 1010 阻擋"""
+    v1.0.41：加 User-Agent，繞過 Cloudflare 對 Python-urllib 的 1010 阻擋
+    v1.0.43：連線錯誤自動 retry 1 次（隔 1.5 秒），緩解現場 4G 抖動。
+             伺服器明確拒絕（HTTP 4xx）不 retry，避免幫攻擊者放大試誤。"""
     import urllib.request
     import urllib.error
     body = json.dumps({"password": password}).encode("utf-8")
-    req = urllib.request.Request(
-        CLOUD_AUTH_URL.rstrip("/") + "/verify",
-        data=body,
-        headers={
-            "Content-Type": "application/json;charset=utf-8",
-            "User-Agent": f"HIV-Auth-Client/{VERSION} (Windows)",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=CLOUD_AUTH_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        if data.get("ok"):
-            return True, ""
-        return False, data.get("reason", "驗證失敗")
-    except urllib.error.HTTPError as e:
+
+    def _once():
+        req = urllib.request.Request(
+            CLOUD_AUTH_URL.rstrip("/") + "/verify",
+            data=body,
+            headers={
+                "Content-Type": "application/json;charset=utf-8",
+                "User-Agent": f"HIV-Auth-Client/{VERSION} (Windows)",
+            },
+            method="POST",
+        )
         try:
-            data = json.loads(e.read().decode("utf-8"))
-            return False, data.get("reason", f"伺服器錯誤 HTTP {e.code}")
-        except Exception:
-            return False, f"伺服器錯誤 HTTP {e.code}"
-    except urllib.error.URLError as e:
-        reason = getattr(e, "reason", str(e))
-        return False, f"連線失敗：{reason}（請確認網路）"
-    except Exception as e:
-        return False, f"請求失敗：{e}"
+            with urllib.request.urlopen(req, timeout=CLOUD_AUTH_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if data.get("ok"):
+                return True, "", False  # ok, reason, transient
+            return False, data.get("reason", "驗證失敗"), False
+        except urllib.error.HTTPError as e:
+            try:
+                data = json.loads(e.read().decode("utf-8"))
+                msg = data.get("reason", f"伺服器錯誤 HTTP {e.code}")
+            except Exception:
+                msg = f"伺服器錯誤 HTTP {e.code}"
+            # 5xx 視為暫時性，4xx 不 retry
+            transient = 500 <= e.code < 600
+            return False, msg, transient
+        except urllib.error.URLError as e:
+            reason = getattr(e, "reason", str(e))
+            return False, f"連線失敗：{reason}（請確認網路）", True
+        except Exception as e:
+            return False, f"請求失敗：{e}", True
+
+    ok, reason, transient = _once()
+    if ok:
+        return True, ""
+    if transient:
+        time.sleep(1.5)
+        ok, reason, _ = _once()
+        if ok:
+            return True, ""
+    return False, reason
 
 
 def show_password_gate(parent):

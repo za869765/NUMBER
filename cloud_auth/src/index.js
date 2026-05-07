@@ -49,13 +49,39 @@ export default {
       }
       return new Response('Not Found', { status: 404 });
     } catch (e) {
-      return jsonReply({ ok: false, reason: 'server error: ' + e.message }, 500);
+      // v1.0.43: L5 不洩漏 internal error message
+      console.error('worker error:', e && e.stack || e);
+      return jsonReply({ ok: false, reason: '伺服器錯誤，請稍後再試' }, 500);
     }
   },
 };
 
+// ── v1.0.43 速率限制（H3）──────────────────────
+// 用 audit 表反查同 IP 過去 1 分鐘紀錄；30 全部 / 10 失敗即鎖
+async function isRateLimited(env, ip) {
+  if (!ip) return false;
+  try {
+    const r = await env.DB.prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END) AS fails
+       FROM audit WHERE ip = ?1 AND ts >= datetime('now', '-1 minute')`
+    ).bind(ip).first();
+    const total = (r && r.total) || 0;
+    const fails = (r && r.fails) || 0;
+    return total >= 30 || fails >= 10;
+  } catch {
+    return false; // fail-open：D1 錯也讓正常驗證流程接手
+  }
+}
+
 // ── EXE 驗證 ──────────────────────────────────
 async function handleVerify(request, env) {
+  // v1.0.43 H3：先擋頻繁試誤
+  const ip = request.headers.get('cf-connecting-ip') || '';
+  if (await isRateLimited(env, ip)) {
+    await logAudit(request, env, false, '速率限制');
+    return jsonReply({ ok: false, reason: '嘗試太頻繁，請稍後（約 1 分鐘）再試' }, 429);
+  }
   let body;
   try {
     body = await request.json();
@@ -79,8 +105,17 @@ async function handleVerify(request, env) {
     await logAudit(request, env, false, 'killed');
     return jsonReply({ ok: false, reason: row.message || '本服務已停用，請聯絡管理員' }, 403);
   }
-  const hash = await sha256Hex(pwd);
-  if (hash === row.password_hash) {
+  // v1.0.43 M1：PBKDF2 驗證；老 SHA-256 紀錄成功時透明遷移
+  const v = await verifyPassword(pwd, row.password_hash);
+  if (v.ok) {
+    if (v.legacy) {
+      try {
+        const newHash = await pbkdf2Hash(pwd);
+        await env.DB.prepare(
+          'UPDATE auth SET password_hash = ?1 WHERE id = 1'
+        ).bind(newHash).run();
+      } catch { /* 遷移失敗不影響本次登入 */ }
+    }
     await logAudit(request, env, true, '');
     return jsonReply({ ok: true });
   }
@@ -149,9 +184,15 @@ async function handleAdminUpdate(request, env) {
     if (!value || typeof value !== 'string' || value.length < 4) {
       return jsonReply({ ok: false, reason: '密碼至少 4 字' }, 400);
     }
-    const hash = await sha256Hex(value);
+    const hash = await pbkdf2Hash(value);
+    // v1.0.43 M3：UPSERT 避免 schema drift 時 silent fail
     await env.DB.prepare(
-      'UPDATE auth SET password_hash = ?1, password_plain = ?2, updated_at = ?3 WHERE id = 1'
+      `INSERT INTO auth (id, password_hash, password_plain, message, killed, updated_at)
+       VALUES (1, ?1, ?2, '', 0, ?3)
+       ON CONFLICT(id) DO UPDATE SET
+         password_hash = excluded.password_hash,
+         password_plain = excluded.password_plain,
+         updated_at = excluded.updated_at`
     )
       .bind(hash, value, now)
       .run();
@@ -162,9 +203,14 @@ async function handleAdminUpdate(request, env) {
     if (!value || typeof value !== 'string' || value.length < 4) {
       return jsonReply({ ok: false, reason: '密碼至少 4 字' }, 400);
     }
-    const hash = await sha256Hex(value);
+    const hash = await pbkdf2Hash(value);
     await env.DB.prepare(
-      'UPDATE auth SET password_hash = ?1, password_plain = ?2, updated_at = ?3 WHERE id = 2'
+      `INSERT INTO auth (id, password_hash, password_plain, message, killed, updated_at)
+       VALUES (2, ?1, ?2, '', 0, ?3)
+       ON CONFLICT(id) DO UPDATE SET
+         password_hash = excluded.password_hash,
+         password_plain = excluded.password_plain,
+         updated_at = excluded.updated_at`
     )
       .bind(hash, value, now)
       .run();
@@ -287,7 +333,12 @@ async function handleAdminAuditClear(request, env) {
   if (!(await checkAdmin(body.admin_pwd, env))) {
     return jsonReply({ ok: false, reason: '管理員密碼錯誤' }, 401);
   }
-  const days = parseInt(body.older_than_days, 10);
+  // v1.0.43 M2：擋負數/NaN，避免「days=-1 全清」footgun
+  const raw = body.older_than_days;
+  const days = parseInt(raw, 10);
+  if (isNaN(days) || days < 0) {
+    return jsonReply({ ok: false, reason: '天數無效（請填 0 或正整數，0=全清）' }, 400);
+  }
   if (days > 0) {
     const r = await env.DB.prepare(
       `DELETE FROM audit WHERE ts < datetime('now', ?1)`
@@ -296,25 +347,40 @@ async function handleAdminAuditClear(request, env) {
       .run();
     return jsonReply({ ok: true, msg: `已清掉 ${days} 天前的紀錄`, meta: r.meta });
   }
-  // 全清
+  // days === 0：全清
   const r = await env.DB.prepare(`DELETE FROM audit`).run();
   return jsonReply({ ok: true, msg: '全部紀錄已清空', meta: r.meta });
 }
 
 // ── 工具 ───────────────────────────────────────
-// v1.0.43：admin pwd 改放 D1 row id=2，wrangler secret 留作 fallback
+// v1.0.43：admin pwd 從 D1 row id=2 讀，wrangler secret 留 fallback
+//          M1：PBKDF2 主用，舊 SHA-256 自動透明遷移
 async function checkAdmin(pwd, env) {
   if (!pwd) return false;
-  const h = await sha256Hex(pwd);
   try {
     const row = await env.DB.prepare(
       'SELECT password_hash FROM auth WHERE id = 2'
     ).first();
-    if (row && row.password_hash) return h === row.password_hash;
+    if (row && row.password_hash) {
+      const v = await verifyPassword(pwd, row.password_hash);
+      if (v.ok && v.legacy) {
+        try {
+          const newHash = await pbkdf2Hash(pwd);
+          await env.DB.prepare(
+            'UPDATE auth SET password_hash = ?1 WHERE id = 2'
+          ).bind(newHash).run();
+        } catch { /* swallow */ }
+      }
+      return v.ok;
+    }
   } catch {
     /* fall through to env */
   }
-  if (env.ADMIN_PASSWORD_HASH) return h === env.ADMIN_PASSWORD_HASH;
+  // env fallback 還是 SHA-256（一次性、用於初次部署）
+  if (env.ADMIN_PASSWORD_HASH) {
+    const h = await sha256Hex(pwd);
+    return h === env.ADMIN_PASSWORD_HASH;
+  }
   return false;
 }
 
@@ -326,6 +392,74 @@ async function sha256Hex(text) {
   return [...new Uint8Array(buf)]
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
+}
+
+// ── v1.0.43 PBKDF2 雜湊（M1）───────────────────
+// 格式：pbkdf2$<iter>$<saltHex>$<hashHex>
+// 舊 SHA-256 是 64 字 hex，無 $，可由 verifyPassword 自動辨識
+const PBKDF2_ITER = 100000;
+const PBKDF2_HASH_BYTES = 32;
+const PBKDF2_SALT_BYTES = 16;
+
+async function pbkdf2Hash(password) {
+  const salt = crypto.getRandomValues(new Uint8Array(PBKDF2_SALT_BYTES));
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations: PBKDF2_ITER, hash: 'SHA-256' },
+    key, PBKDF2_HASH_BYTES * 8
+  );
+  return `pbkdf2$${PBKDF2_ITER}$${bytesToHex(salt)}$${bytesToHex(new Uint8Array(bits))}`;
+}
+
+async function pbkdf2Verify(password, stored) {
+  const parts = stored.split('$');
+  if (parts.length !== 4 || parts[0] !== 'pbkdf2') return false;
+  const iter = parseInt(parts[1], 10);
+  if (!iter || iter < 1000) return false;
+  const salt = hexToBytes(parts[2]);
+  const expected = parts[3];
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations: iter, hash: 'SHA-256' },
+    key, PBKDF2_HASH_BYTES * 8
+  );
+  const got = bytesToHex(new Uint8Array(bits));
+  return constantTimeEq(got, expected);
+}
+
+async function verifyPassword(password, stored) {
+  if (!stored) return { ok: false, legacy: false };
+  if (typeof stored === 'string' && stored.startsWith('pbkdf2$')) {
+    return { ok: await pbkdf2Verify(password, stored), legacy: false };
+  }
+  // legacy SHA-256（64 字 hex）
+  const ok = (await sha256Hex(password)) === stored;
+  return { ok, legacy: true };
+}
+
+function bytesToHex(bytes) {
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToBytes(hex) {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  }
+  return out;
+}
+
+function constantTimeEq(a, b) {
+  if (a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) {
+    r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return r === 0;
 }
 
 function jsonReply(obj, status = 200) {
@@ -454,13 +588,13 @@ const ADMIN_HTML = `<!doctype html>
     <div class="card">
       <h2>📊 每日使用量</h2>
       <div class="row" style="gap:6px;margin-bottom:8px">
-        <select id="chart_days" onchange="loadDaily()">
+        <select id="chart_days" onchange="loadDaily(false)">
           <option value="7">最近 7 天</option>
           <option value="14" selected>最近 14 天</option>
           <option value="30">最近 30 天</option>
           <option value="60">最近 60 天</option>
         </select>
-        <button class="ghost" onclick="loadDaily()">重新整理</button>
+        <button class="ghost" onclick="loadDaily(true)">重新整理</button>
         <span style="margin-left:auto;color:#546e7a;font-size:12px">數字 = 不同 IP 數（≈使用人數）</span>
       </div>
       <div id="chart"></div>
@@ -541,7 +675,7 @@ async function login(){
   document.getElementById('login_card').classList.add('hidden');
   document.getElementById('main_card').classList.remove('hidden');
   renderState(r.state);
-  loadDaily();
+  loadDaily(true);  // 初次：含 Top IP
   loadAudit();
 }
 function fmt(ts){
@@ -556,28 +690,28 @@ function fmt(ts){
     return d.toLocaleString('zh-TW',{hour12:false});
   }catch{return ts;}
 }
-async function loadDaily(){
+// v1.0.43 L1：daily 只拉每日資料；stats（Top IP，固定 7 天）獨立呼叫
+async function loadDaily(refreshStats){
   const days = parseInt(document.getElementById('chart_days').value, 10);
-  const [d, s] = await Promise.all([
-    api('/admin/audit/daily', {admin_pwd: ADM, days}),
-    api('/admin/audit/stats', {admin_pwd: ADM}),
-  ]);
+  const d = await api('/admin/audit/daily', {admin_pwd: ADM, days});
   if (!d.ok) return toast(d.reason || '失敗', true);
   renderChart(d.rows, days);
-  // 順帶更新 Top IP 表（從 stats 端點）
-  if (s.ok) {
-    const tb = document.querySelector('#top_ip_table tbody');
-    tb.innerHTML = '';
-    for (const row of (s.top_ips || [])){
-      const tr = document.createElement('tr');
-      tr.innerHTML = '<td class="ip">'+(row.ip||'—')+'</td>'+
-                     '<td>'+(row.country||'')+'</td>'+
-                     '<td>'+(row.total||0)+'</td>'+
-                     '<td style="color:#1b5e20">'+(row.ok_cnt||0)+'</td>'+
-                     '<td style="color:#c62828">'+(row.fail_cnt||0)+'</td>'+
-                     '<td class="ts">'+fmt(row.last_seen)+'</td>';
-      tb.appendChild(tr);
-    }
+  if (refreshStats) await loadStats();
+}
+async function loadStats(){
+  const s = await api('/admin/audit/stats', {admin_pwd: ADM});
+  if (!s.ok) return;
+  const tb = document.querySelector('#top_ip_table tbody');
+  tb.innerHTML = '';
+  for (const row of (s.top_ips || [])){
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td class="ip">'+(row.ip||'—')+'</td>'+
+                   '<td>'+(row.country||'')+'</td>'+
+                   '<td>'+(row.total||0)+'</td>'+
+                   '<td style="color:#1b5e20">'+(row.ok_cnt||0)+'</td>'+
+                   '<td style="color:#c62828">'+(row.fail_cnt||0)+'</td>'+
+                   '<td class="ts">'+fmt(row.last_seen)+'</td>';
+    tb.appendChild(tr);
   }
 }
 
@@ -659,7 +793,7 @@ async function clearAudit(){
   const r = await api('/admin/audit/clear', {admin_pwd: ADM, older_than_days: n});
   if (!r.ok) return toast(r.reason || '失敗', true);
   toast(r.msg || '已清');
-  loadDaily();
+  loadDaily(true);  // 清過後 Top IP 也要重抓
   loadAudit();
 }
 async function loadState(){
@@ -704,7 +838,9 @@ async function setPwd(){
 async function setAdminPwd(){
   const v = document.getElementById('new_admin_pwd').value;
   if (!v || v.length < 4) return toast('密碼至少 4 字', true);
-  if (!confirm('確定要把管理員密碼改成「' + v + '」？下次登入這個後台要用新密碼。')) return;
+  // v1.0.43 L2：confirm 不顯示明文，避免路人看到
+  const masked = '•'.repeat(v.length) + ' (' + v.length + ' 字)';
+  if (!confirm('確定把管理員密碼改成 ' + masked + '？下次登入這個後台要用新密碼。')) return;
   const r = await api('/admin/update', {admin_pwd: ADM, action:'set_admin_password', value:v});
   if (!r.ok) return toast(r.reason || '失敗', true);
   document.getElementById('new_admin_pwd').value = '';
