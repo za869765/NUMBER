@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.44"
+VERSION = "1.0.45"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -433,38 +433,83 @@ def import_xlsx_profiles(path):
 
 class CanvasProgressBar(tk.Canvas):
     """v1.0.19：自訂進度條 — 高度可調 + 中央顯示 % 文字
+       v1.0.45：升級為跑者進度條 — 卡通人物 🏃 從 0% 跑到 🏁 100%，
+                身體上下跳動模擬奔跑，數值動時才動，停下回到靜止姿勢。
        注意：`self._w` 與 `self._h` 是 Tk widget 內部屬性（Tcl 名稱），不可覆蓋！
        這裡改用 `self._cw` / `self._ch`。"""
-    def __init__(self, parent, width=600, height=34, bg="#e0e0e0", fg="#1565c0", **kw):
+    def __init__(self, parent, width=600, height=44, bg="#e0e0e0", fg="#1565c0", **kw):
         super().__init__(parent, width=width, height=height, bg=bg,
                          highlightthickness=0, bd=0, **kw)
         self._cw, self._ch = width, height
         self._bg, self._fg = bg, fg
-        self.bar = self.create_rectangle(0, 0, 0, height, fill=fg, width=0)
-        self.txt = self.create_text(width // 2, height // 2,
+        # 底部 14px 的進度填充 bar
+        bar_top = height - 14
+        self._bar_top = bar_top
+        self.bar_track = self.create_rectangle(0, bar_top, width, height,
+                                                fill="#f5f5f5", outline="")
+        self.bar = self.create_rectangle(0, bar_top, 0, height, fill=fg, width=0)
+        # 終點旗 🏁（右側）
+        self._runner_y = bar_top - 14  # 跑者基準 y
+        self.flag = self.create_text(width - 16, self._runner_y,
+                                      text="🏁", font=("Segoe UI Emoji", 16))
+        # 跑者 🏃
+        self.runner = self.create_text(22, self._runner_y,
+                                        text="🏃", font=("Segoe UI Emoji", 18))
+        # % 文字（懸浮在 bar 上方中央）
+        self.txt = self.create_text(width // 2, bar_top - 1,
                                      text="0.0%", fill="#37474f",
-                                     font=("微軟正黑體", 12, "bold"))
+                                     font=("微軟正黑體", 10, "bold"),
+                                     anchor="s")
         self.value = 0; self.maximum = 100
+        self._frame = 0
+        self._anim_running = False
         self.bind("<Configure>", self._on_resize)
+        self.after(220, self._tick)
+
+    def _tick(self):
+        # 動畫 tick：跑步中 frame 在 0/1 切換 → 上下跳動
+        if self._anim_running:
+            self._frame = 1 - self._frame
+            cur = self.coords(self.runner)
+            x = cur[0] if cur else 22
+            self.coords(self.runner, x, self._runner_y + (-3 if self._frame else 0))
+        try:
+            self.after(220, self._tick)
+        except Exception:
+            pass  # widget 已銷毀
 
     def _on_resize(self, event):
         self._cw = event.width
-        self.coords(self.txt, self._cw // 2, self._ch // 2)
+        self.coords(self.bar_track, 0, self._bar_top, self._cw, self._ch)
+        self.coords(self.flag, self._cw - 16, self._runner_y)
+        self.coords(self.txt, self._cw // 2, self._bar_top - 1)
         self._refresh()
 
     def configure_value(self, value, maximum=None):
         if maximum is not None:
             self.maximum = max(1, maximum)
         self.value = max(0, min(value, self.maximum))
+        pct = self.value / self.maximum if self.maximum else 0
+        self._anim_running = 0 < pct < 1
+        if not self._anim_running:
+            # 停下：回到水平基準
+            cur = self.coords(self.runner)
+            x = cur[0] if cur else 22
+            self.coords(self.runner, x, self._runner_y)
+            self._frame = 0
         self._refresh()
 
     def _refresh(self):
         pct = (self.value / self.maximum) if self.maximum else 0
-        w = int(self._cw * pct)
-        self.coords(self.bar, 0, 0, w, self._ch)
+        bar_w = int(self._cw * pct)
+        self.coords(self.bar, 0, self._bar_top, bar_w, self._ch)
         self.itemconfigure(self.txt, text=f"{pct*100:.1f}%")
-        # 文字顏色：bar 蓋過中央時用白字，否則用深色
-        self.itemconfigure(self.txt, fill="white" if pct >= 0.45 else "#263238")
+        # 跑者 x：起點 22 → 終點 _cw - 36（避開右側 🏁）
+        x_min, x_max = 22, max(22, self._cw - 36)
+        runner_x = x_min + (x_max - x_min) * pct
+        cur = self.coords(self.runner)
+        y = cur[1] if len(cur) >= 2 else self._runner_y
+        self.coords(self.runner, runner_x, y)
 
     def configure_theme(self, bg, fg):
         self._bg, self._fg = bg, fg
@@ -1755,8 +1800,8 @@ class App:
         self.progress_var = tk.StringVar(value="待命")
         ttk.Label(prog_fr, textvariable=self.progress_var,
                   font=("微軟正黑體", 11, "bold")).pack(side="left")
-        # v1.0.19：自訂 Canvas 進度條（高度 34，中央顯示 %）
-        self.pb = CanvasProgressBar(prog_fr, height=34)
+        # v1.0.19/v1.0.45：自訂 Canvas 進度條（高度 44，跑者 🏃 → 🏁 動畫）
+        self.pb = CanvasProgressBar(prog_fr, height=44)
         self.pb.pack(side="left", padx=12, fill="x", expand=True)
         # v1.0.19 統計列（置中）
         stat_fr = ttk.Frame(self.root)
@@ -1788,6 +1833,14 @@ class App:
         ttk.Button(log_btns, text="💾 儲存 Log",  command=self.save_log).pack(side="left", padx=2)
         ttk.Label(log_btns, text="（儲存 Log 會將目前畫面內容存成 .txt，方便回報修正）",
                   foreground="#666").pack(side="left", padx=12)
+
+        # ── v1.0.45 免責聲明（最底列） ──
+        disclaimer_fr = ttk.Frame(self.root)
+        disclaimer_fr.pack(fill="x", padx=6, pady=(0, 4))
+        ttk.Label(disclaimer_fr,
+                  text="⚠ 免責聲明：本工具僅供研究網頁服務技術用途",
+                  foreground="#9e9e9e",
+                  font=("微軟正黑體", 9)).pack(side="right")
 
     def _make_pct_block(self, title, options, defaults, parent=None):
         fr = ttk.LabelFrame(parent or self.root, text=title + " （調一個，其他自動平衡到 100%）")
