@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.1.5"
+VERSION = "1.1.6"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -4189,52 +4189,64 @@ def show_password_gate(parent):
             except Exception: pass
 
         def _bg_download():
-            import urllib.request, time as _t
+            """v1.1.4 改用 Windows 內建 curl.exe（PyInstaller import urllib 在某些 PC
+            配 proxy/防火牆時會 hang 2+ 分鐘，curl 直接 winsock 無這問題）"""
+            import time as _t, subprocess, shutil
             t0 = _t.time()
+            curl_exe = shutil.which("curl.exe") or r"C:\Windows\System32\curl.exe"
+            if not os.path.exists(curl_exe):
+                spin_state["running"] = False
+                dlg.after(0, lambda: (
+                    _set_msg("⚠ 系統缺 curl.exe（需 Windows 10 1803+）\n請點下方重試。",
+                             "#c62828"),
+                    _set_btn("重新下載", cmd=_do_force_update,
+                             state="normal", bg="#c62828"),
+                ))
+                return
+            expected_size = update_state.get("size") or 0
             try:
-                # v1.1.4：強制不走系統 proxy（衛生所常設了死 proxy 導致 urllib hang 2+ 分鐘）
-                # PowerShell 跟 IE 預設都不會走，但 Python urllib 會讀 Windows registry
-                no_proxy = urllib.request.ProxyHandler({})
-                opener = urllib.request.build_opener(no_proxy,
-                                                     urllib.request.HTTPSHandler())
-                opener.addheaders = [
-                    ("User-Agent", f"HIV-Auth-Client/{VERSION} (Windows)"),
-                ]
-                # v1.1.4：timeout 120→15，proxy bypass 後若還卡 15 秒就確定有事
-                with opener.open(url, timeout=15) as resp:
-                    total = 0
-                    try: total = int(resp.headers.get("Content-Length", 0))
-                    except Exception: total = 0
-                    # v1.1.2：urlopen 一回來就立刻把按鈕從「準備中」改成「下載中…」
-                    # 確保使用者看得到狀態變化，而不是一直停在準備中
-                    spin_state["running"] = False  # 停 spinner
-                    mb = total // 1024 // 1024 if total else 0
-                    init_text = (f"⬇ 已連上，正在下載 v{update_state['latest']} "
-                                 f"({mb} MB)…" if mb else
-                                 "⬇ 已連上，正在下載新版本…")
-                    dlg.after(0, lambda t=init_text: _set_msg(t, ACCENT))
-                    dlg.after(0, lambda: _set_btn("下載中… 0%", state="disabled"))
-                    received = 0
-                    last_ui = 0
-                    with open(tmp, "wb") as f:
-                        while True:
-                            chunk = resp.read(64 * 1024)
-                            if not chunk: break
-                            f.write(chunk)
-                            received += len(chunk)
-                            # 每 200ms 才更新 UI 一次（避免狂打）
-                            now = _t.time()
-                            if now - last_ui > 0.2 or not chunk:
-                                last_ui = now
-                                if total:
-                                    pct = received / total * 100
-                                    speed = received / max(0.1, now - t0) / 1024 / 1024
-                                    text = f"⬇ 下載中 {pct:.0f}% ({received//1024//1024}/{total//1024//1024} MB · {speed:.1f} MB/s)"
-                                else:
-                                    text = f"⬇ 下載中 {received//1024//1024} MB"
-                                dlg.after(0, lambda t=text: _set_msg(t, ACCENT))
-                                dlg.after(0, lambda p=int(received / max(1, total) * 100):
-                                              _set_btn(f"下載中… {p}%", state="disabled"))
+                # 啟動 curl，不顯示進度條（我們自己 poll 檔案大小）
+                # -L 跟 redirect、-S 顯示 error、-s 安靜、--connect-timeout 連線秒數
+                # --max-time 整個下載最多秒數
+                proc = subprocess.Popen(
+                    [curl_exe, "-L", "-s", "-S",
+                     "-A", f"HIV-Auth-Client/{VERSION} (Windows)",
+                     "--connect-timeout", "10",
+                     "--max-time", "180",
+                     "-o", tmp,
+                     url],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    creationflags=0x08000000,  # CREATE_NO_WINDOW
+                )
+                # spinner 停掉，改成下載中
+                spin_state["running"] = False
+                mb_total = (expected_size // 1024 // 1024) if expected_size else 0
+                init_text = (f"⬇ 下載中 v{update_state['latest']} ({mb_total} MB)…"
+                             if mb_total else
+                             "⬇ 下載中新版本…")
+                dlg.after(0, lambda t=init_text: _set_msg(t, ACCENT))
+                # 每 200ms 用檔案大小算進度
+                while proc.poll() is None:
+                    try: cur = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+                    except Exception: cur = 0
+                    elapsed = _t.time() - t0
+                    speed = cur / max(0.1, elapsed) / 1024 / 1024
+                    if expected_size:
+                        pct = cur / expected_size * 100
+                        text = f"⬇ 下載中 {pct:.0f}% ({cur//1024//1024}/{expected_size//1024//1024} MB · {speed:.1f} MB/s)"
+                        btn_text = f"下載中… {int(pct)}%"
+                    else:
+                        text = f"⬇ 下載中 {cur//1024//1024} MB ({speed:.1f} MB/s)"
+                        btn_text = f"下載中… {cur//1024//1024} MB"
+                    dlg.after(0, lambda t=text: _set_msg(t, ACCENT))
+                    dlg.after(0, lambda b=btn_text: _set_btn(b, state="disabled"))
+                    _t.sleep(0.2)
+                rc = proc.returncode
+                if rc != 0:
+                    err = proc.stderr.read().decode("utf-8", errors="ignore")[:120]
+                    raise RuntimeError(f"curl rc={rc} {err}")
+                if not os.path.exists(tmp) or os.path.getsize(tmp) < 30 * 1024 * 1024:
+                    raise RuntimeError(f"檔案大小異常 ({os.path.getsize(tmp) if os.path.exists(tmp) else 0} bytes)")
                 os.replace(tmp, new_path)
 
                 # v1.1.1：下載完 → 啟動新版 → 舊版自我 exit → 新版啟動後搬舊版到 old/
@@ -4386,6 +4398,7 @@ def show_password_gate(parent):
             update_state["required"] = True
             update_state["latest"] = latest
             update_state["filename"] = data.get("filename")
+            update_state["size"] = data.get("size") or 0
             durl = data.get("download_url") or "/exe-download"
             if not durl.startswith("http"):
                 durl = CLOUD_AUTH_URL.rstrip("/") + durl
