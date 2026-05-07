@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.47"
+VERSION = "1.0.48"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -437,57 +437,150 @@ def import_xlsx_profiles(path):
 
 
 class CanvasProgressBar(tk.Canvas):
-    """v1.0.19：自訂進度條 — 高度可調 + 中央顯示 % 文字
-       v1.0.45：升級為跑者進度條 — 卡通人物 🏃 從 0% 跑到 🏁 100%，
-                身體上下跳動模擬奔跑，數值動時才動，停下回到靜止姿勢。
-       注意：`self._w` 與 `self._h` 是 Tk widget 內部屬性（Tcl 名稱），不可覆蓋！
-       這裡改用 `self._cw` / `self._ch`。"""
-    def __init__(self, parent, width=600, height=44, bg="#e0e0e0", fg="#1565c0", **kw):
+    """v1.0.48：Canvas 自繪卡通跑者進度條（取代 v1.0.45 emoji 版）
+    參考 Claude Design 概念稿 aRg0bGRxr6wjMMbSFm2vVw exe_concept.html。
+    跑者由多個 Canvas 圖元組成，主題切換時更新身體/腿色。
+    軌道下方 18px 進度填充 bar，上方放跑者 + 終點旗。
+    跑步時上下 ±3px 跳動模擬奔跑。
+
+    注意：`self._w` 與 `self._h` 是 Tk widget 內部屬性，不可覆蓋！用 `_cw`/`_ch`。"""
+
+    SKIN = "#f5c8a3"
+    HAIR = "#3a2a1f"
+    EYE = "#1a1a1a"
+    SHOE = "#2a2a2a"
+    POLE = "#4a5567"
+    SHADOW = "#bdbdbd"
+
+    def __init__(self, parent, width=600, height=58, bg="#f3f5f8",
+                 accent="#2c6bd1", accent_2="#1f4f9c", **kw):
         super().__init__(parent, width=width, height=height, bg=bg,
                          highlightthickness=0, bd=0, **kw)
         self._cw, self._ch = width, height
-        self._bg, self._fg = bg, fg
-        # 底部 14px 的進度填充 bar
-        bar_top = height - 14
+        self._bg, self._fg = bg, accent
+        self._fg_2 = accent_2
+        # 底部 18px 進度填充 bar
+        bar_top = height - 18
         self._bar_top = bar_top
         self.bar_track = self.create_rectangle(0, bar_top, width, height,
-                                                fill="#f5f5f5", outline="")
-        self.bar = self.create_rectangle(0, bar_top, 0, height, fill=fg, width=0)
-        # 終點旗 🏁（右側）
-        self._runner_y = bar_top - 14  # 跑者基準 y
-        self.flag = self.create_text(width - 16, self._runner_y,
-                                      text="🏁", font=("Segoe UI Emoji", 16))
-        # 跑者 🏃
-        self.runner = self.create_text(22, self._runner_y,
-                                        text="🏃", font=("Segoe UI Emoji", 18))
-        # % 文字（懸浮在 bar 上方中央）
-        self.txt = self.create_text(width // 2, bar_top - 1,
-                                     text="0.0%", fill="#37474f",
-                                     font=("微軟正黑體", 10, "bold"),
+                                                fill="#eef1f5", outline="")
+        self.bar = self.create_rectangle(0, bar_top, 0, height, fill=accent, width=0)
+        # 跑者基準 y（腳剛好踩在 bar 頂上）
+        self._runner_y = bar_top - 6
+        # 跑者 cartoon 圖元
+        self._runner_items = {}
+        self._build_runner(22, self._runner_y)
+        # 終點旗
+        self._flag_items = {}
+        self._build_flag(width - 22, self._runner_y)
+        # % 文字（懸浮 bar 上方）
+        self.txt = self.create_text(width // 2, bar_top - 2,
+                                     text="0.0%", fill="#4a5567",
+                                     font=("Consolas", 9, "bold"),
                                      anchor="s")
-        self.value = 0; self.maximum = 100
+        self.value = 0
+        self.maximum = 100
         self._frame = 0
         self._anim_running = False
         self.bind("<Configure>", self._on_resize)
         self.after(220, self._tick)
 
+    # ── 建構跑者（基準點：腳底中心 (cx, by)）──
+    def _build_runner(self, cx, by):
+        """畫一隻 24×34 的卡通跑者，腳底中心對齊 (cx, by)
+        items 字典記住每個圖元 id，後續可移動/換色"""
+        i = self._runner_items
+        # 影子（橢圓）
+        i['shadow'] = self.create_oval(cx-9, by-1, cx+9, by+3, fill=self.SHADOW, outline="")
+        # 後腿（三點折線 smooth）
+        i['back_leg'] = self.create_line(cx-2, by-14, cx-6, by-7, cx-9, by-1,
+                                          smooth=True, width=3, fill=self._fg_2, capstyle="round")
+        # 前腿
+        i['front_leg'] = self.create_line(cx+1, by-14, cx+5, by-9, cx+8, by-3,
+                                           smooth=True, width=3, fill=self._fg_2, capstyle="round")
+        # 鞋
+        i['shoe_back'] = self.create_oval(cx-11, by-2, cx-7, by+1, fill=self.SHOE, outline="")
+        i['shoe_front'] = self.create_oval(cx+6, by-4, cx+10, by-1, fill=self.SHOE, outline="")
+        # 身體（梯形 polygon smooth）— 從腰到肩
+        body_pts = [cx-5, by-14, cx+5, by-15, cx+6, by-22, cx-4, by-23]
+        i['body'] = self.create_polygon(body_pts, smooth=True, fill=self._fg, outline="")
+        # 後手臂
+        i['back_arm'] = self.create_line(cx-4, by-22, cx-9, by-20, cx-11, by-17,
+                                          smooth=True, width=2.5, fill=self.SKIN, capstyle="round")
+        # 前手臂往前甩
+        i['front_arm'] = self.create_line(cx+4, by-22, cx+9, by-23, cx+12, by-26,
+                                           smooth=True, width=2.5, fill=self.SKIN, capstyle="round")
+        # 頭
+        i['head'] = self.create_oval(cx-5, by-32, cx+5, by-22, fill=self.SKIN, outline="")
+        # 頭髮（從上覆過頭頂的弧）
+        hair_pts = [cx-5, by-26, cx-3, by-32, cx+1, by-33, cx+5, by-32, cx+5, by-27,
+                    cx+3, by-29, cx, by-28, cx-3, by-29]
+        i['hair'] = self.create_polygon(hair_pts, smooth=True, fill=self.HAIR, outline="")
+        # 眼睛
+        i['eye'] = self.create_oval(cx+1, by-29, cx+2.5, by-27.5, fill=self.EYE, outline="")
+        # 嘴角微笑
+        i['mouth'] = self.create_line(cx+1, by-25, cx+2.5, by-24.5, cx+4, by-25,
+                                       smooth=True, width=1, fill=self.EYE)
+        # 汗水（兩顆）
+        i['sweat1'] = self.create_oval(cx-9, by-34, cx-7, by-32, fill="#76aef0", outline="")
+        i['sweat2'] = self.create_oval(cx-12, by-29, cx-10.5, by-27.5, fill="#76aef0", outline="")
+        # 記住基準座標供後續移動/重畫
+        self._runner_cx = cx
+        self._runner_by = by
+
+    def _build_flag(self, cx, by):
+        """終點旗：旗桿 + 三角旗 + 6 顆白格子"""
+        f = self._flag_items
+        f['pole'] = self.create_line(cx, by-30, cx, by+2, fill=self.POLE, width=2, capstyle="round")
+        f['flag'] = self.create_polygon(cx+1, by-30, cx+18, by-30, cx+15, by-25,
+                                         cx+18, by-20, cx+1, by-20,
+                                         smooth=False, fill=self.POLE, outline="")
+        # 6 顆白格子
+        f['c1'] = self.create_rectangle(cx+3, by-29, cx+5, by-27, fill="white", outline="")
+        f['c2'] = self.create_rectangle(cx+9, by-29, cx+11, by-27, fill="white", outline="")
+        f['c3'] = self.create_rectangle(cx+6, by-26, cx+8, by-24, fill="white", outline="")
+        f['c4'] = self.create_rectangle(cx+12, by-26, cx+14, by-24, fill="white", outline="")
+        f['c5'] = self.create_rectangle(cx+3, by-23, cx+5, by-21, fill="white", outline="")
+        f['c6'] = self.create_rectangle(cx+9, by-23, cx+11, by-21, fill="white", outline="")
+        self._flag_cx = cx
+        self._flag_by = by
+
+    def _move_runner_to(self, new_cx, new_by):
+        """整組跑者圖元位移到新基準點"""
+        dx = new_cx - self._runner_cx
+        dy = new_by - self._runner_by
+        if dx == 0 and dy == 0:
+            return
+        for item_id in self._runner_items.values():
+            self.move(item_id, dx, dy)
+        self._runner_cx = new_cx
+        self._runner_by = new_by
+
+    def _move_flag_to(self, new_cx):
+        """旗子只 x 方向（resize 時）"""
+        dx = new_cx - self._flag_cx
+        if dx == 0:
+            return
+        for item_id in self._flag_items.values():
+            self.move(item_id, dx, 0)
+        self._flag_cx = new_cx
+
     def _tick(self):
-        # 動畫 tick：跑步中 frame 在 0/1 切換 → 上下跳動
+        # 奔跑中：上下 ±3px 跳動
         if self._anim_running:
             self._frame = 1 - self._frame
-            cur = self.coords(self.runner)
-            x = cur[0] if cur else 22
-            self.coords(self.runner, x, self._runner_y + (-3 if self._frame else 0))
+            new_by = self._runner_y + (-3 if self._frame else 0)
+            self._move_runner_to(self._runner_cx, new_by)
         try:
             self.after(220, self._tick)
         except Exception:
-            pass  # widget 已銷毀
+            pass
 
     def _on_resize(self, event):
         self._cw = event.width
         self.coords(self.bar_track, 0, self._bar_top, self._cw, self._ch)
-        self.coords(self.flag, self._cw - 16, self._runner_y)
-        self.coords(self.txt, self._cw // 2, self._bar_top - 1)
+        self.coords(self.txt, self._cw // 2, self._bar_top - 2)
+        self._move_flag_to(self._cw - 22)
         self._refresh()
 
     def configure_value(self, value, maximum=None):
@@ -497,10 +590,7 @@ class CanvasProgressBar(tk.Canvas):
         pct = self.value / self.maximum if self.maximum else 0
         self._anim_running = 0 < pct < 1
         if not self._anim_running:
-            # 停下：回到水平基準
-            cur = self.coords(self.runner)
-            x = cur[0] if cur else 22
-            self.coords(self.runner, x, self._runner_y)
+            self._move_runner_to(self._runner_cx, self._runner_y)
             self._frame = 0
         self._refresh()
 
@@ -509,17 +599,23 @@ class CanvasProgressBar(tk.Canvas):
         bar_w = int(self._cw * pct)
         self.coords(self.bar, 0, self._bar_top, bar_w, self._ch)
         self.itemconfigure(self.txt, text=f"{pct*100:.1f}%")
-        # 跑者 x：起點 22 → 終點 _cw - 36（避開右側 🏁）
-        x_min, x_max = 22, max(22, self._cw - 36)
-        runner_x = x_min + (x_max - x_min) * pct
-        cur = self.coords(self.runner)
-        y = cur[1] if len(cur) >= 2 else self._runner_y
-        self.coords(self.runner, runner_x, y)
+        # 跑者 x：起點 22 → 右邊 _cw - 50（避開旗子）
+        x_min, x_max = 22, max(22, self._cw - 50)
+        runner_cx = int(x_min + (x_max - x_min) * pct)
+        # 保留當前 y（可能在跳動中）
+        cur_by = self._runner_by
+        self._move_runner_to(runner_cx, cur_by)
 
-    def configure_theme(self, bg, fg):
+    def configure_theme(self, bg, fg, fg_2=None):
+        """主題切換：bg、進度條色、跑者衣服色（runner-2 用 fg_2 或 fg 暗化）"""
         self._bg, self._fg = bg, fg
+        if fg_2:
+            self._fg_2 = fg_2
         self.configure(bg=bg)
         self.itemconfigure(self.bar, fill=fg)
+        self.itemconfigure(self._runner_items['body'], fill=fg)
+        self.itemconfigure(self._runner_items['back_leg'], fill=self._fg_2)
+        self.itemconfigure(self._runner_items['front_leg'], fill=self._fg_2)
 
 # ── 工具函式 ──────────────────────────────────────
 def _hide_path(path):
@@ -1781,14 +1877,25 @@ class App:
         right.pack(side="right")
         big_style = ttk.Style()
         try:
-            big_style.configure("Big.TButton",     font=("微軟正黑體", 14, "bold"), padding=(20, 10))
-            big_style.configure("BigPause.TButton",font=("微軟正黑體", 14, "bold"), padding=(16, 10), foreground="#e65100")
-            big_style.configure("BigStop.TButton", font=("微軟正黑體", 14, "bold"), padding=(16, 10), foreground="#b71c1c")
-            big_style.configure("Medium.TButton",  font=("微軟正黑體", 11, "bold"), padding=(14, 8))  # v1.0.44 輸出資料夾用
+            # v1.0.48：開始按鈕加強（Claude Design 設計概念稿）— 主題藍底白字、字級放大、padding 加倍
+            #          舊版本是 ttk default 灰底，視覺重量不夠
+            big_style.configure("BigStart.TButton",
+                                font=("微軟正黑體", 15, "bold"),
+                                padding=(28, 12),
+                                background="#2c6bd1", foreground="#ffffff",
+                                borderwidth=0, focuscolor="#2c6bd1")
+            big_style.map("BigStart.TButton",
+                          background=[("active", "#1f4f9c"), ("disabled", "#b0bec5")],
+                          foreground=[("disabled", "#ffffff")])
+            # 兼容舊樣式名（避免別處 Big.TButton 引用失效）
+            big_style.configure("Big.TButton", font=("微軟正黑體", 14, "bold"), padding=(20, 10))
+            big_style.configure("BigPause.TButton", font=("微軟正黑體", 14, "bold"), padding=(16, 10), foreground="#e65100")
+            big_style.configure("BigStop.TButton",  font=("微軟正黑體", 14, "bold"), padding=(16, 10), foreground="#b71c1c")
+            big_style.configure("Medium.TButton",   font=("微軟正黑體", 11, "bold"), padding=(14, 8))  # v1.0.44 輸出資料夾用
         except Exception:
             pass
         # v1.0.26：按鈕依當前分頁切換行為
-        self.start_btn = ttk.Button(right, text="▶ 開始取號", command=self._smart_start, style="Big.TButton")
+        self.start_btn = ttk.Button(right, text="▶ 開始取號", command=self._smart_start, style="BigStart.TButton")
         self.start_btn.pack(side="left", padx=6, ipady=4)
         self.pause_btn = ttk.Button(right, text="⏸ 暫停", command=self.toggle_pause,
                                      state="disabled", style="BigPause.TButton")
@@ -1805,8 +1912,10 @@ class App:
         self.progress_var = tk.StringVar(value="待命")
         ttk.Label(prog_fr, textvariable=self.progress_var,
                   font=("微軟正黑體", 11, "bold")).pack(side="left")
-        # v1.0.19/v1.0.45：自訂 Canvas 進度條（高度 44，跑者 🏃 → 🏁 動畫）
-        self.pb = CanvasProgressBar(prog_fr, height=44)
+        # v1.0.19/v1.0.45/v1.0.48：自訂 Canvas 進度條（高度 58，Canvas 自繪卡通跑者 + 終點旗）
+        _theme_now = THEMES.get(self.theme_var.get(), THEMES[DEFAULT_THEME])
+        self.pb = CanvasProgressBar(prog_fr, height=58, bg=_theme_now["panel"],
+                                     accent=_theme_now["accent"], accent_2=_theme_now["accent_hover"])
         self.pb.pack(side="left", padx=12, fill="x", expand=True)
         # v1.0.19 統計列（置中）
         stat_fr = ttk.Frame(self.root)
@@ -2833,8 +2942,8 @@ class App:
             # Progressbar (legacy ttk - 雖然主進度條改 Canvas，這裡保留設定以防其他地方用)
             style.configure("TProgressbar", troughcolor=t["panel"], background=t["accent"],
                            borderwidth=0, thickness=18)
-            # 自訂 Canvas 進度條
-            try: self.pb.configure_theme(t["panel"], t["accent"])
+            # 自訂 Canvas 進度條（v1.0.48 跑者衣服色也跟主題走）
+            try: self.pb.configure_theme(t["panel"], t["accent"], t["accent_hover"])
             except Exception: pass
             # Checkbutton
             style.configure("TCheckbutton", background=t["bg"], foreground=t["fg"])
