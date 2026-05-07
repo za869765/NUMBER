@@ -18,13 +18,102 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.54"
+VERSION = "1.0.55"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
 # 部署 cloud_auth/ 後得到的 workers.dev 網址貼這
 CLOUD_AUTH_URL = "https://hiv-auth.za869765.workers.dev"
 CLOUD_AUTH_TIMEOUT = 8  # 秒
+
+# ── v1.0.55 自動更新 ──
+# 啟動時背景查 /version，如果版本比自己新 → 下載新 EXE 到同層、log 通知使用者
+# manifest.json + latest.exe 存在 R2 bucket "hiv-exe"
+def _semver_compare(a, b):
+    """比較版本字串：x.y.z；回 1=a>b、-1=a<b、0=eq"""
+    def parts(s):
+        out = []
+        for x in str(s).split("."):
+            num = ""
+            for c in x:
+                if c.isdigit(): num += c
+                else: break
+            out.append(int(num) if num else 0)
+        while len(out) < 3:
+            out.append(0)
+        return out[:3]
+    pa, pb = parts(a), parts(b)
+    for x, y in zip(pa, pb):
+        if x > y: return 1
+        if x < y: return -1
+    return 0
+
+def check_and_download_update(log_callback=None):
+    """v1.0.55：背景查 /version，有新版自動下載到 EXE 同層
+    log_callback: 收到狀態訊息的 callback（如 self.log；會 thread-safe 透過 root.after 呼叫）
+    開發 .py 模式跳過（不下載）。"""
+    def _log(m):
+        if log_callback:
+            try: log_callback(m)
+            except Exception: pass
+
+    if not getattr(sys, "frozen", False):
+        return  # .py 開發模式跳過
+
+    import urllib.request, urllib.error
+    try:
+        req = urllib.request.Request(
+            CLOUD_AUTH_URL.rstrip("/") + "/version",
+            headers={"User-Agent": f"HIV-Auth-Client/{VERSION} (Windows)"},
+        )
+        with urllib.request.urlopen(req, timeout=CLOUD_AUTH_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if not data.get("ok"):
+            return  # 還沒上傳任何版本
+        latest = (data.get("latest") or "").strip()
+        if not latest:
+            return
+        cmp_ = _semver_compare(latest, VERSION)
+        if cmp_ <= 0:
+            return  # 已是最新或更舊（dev 環境）
+        # 找下載 URL（相對路徑）
+        download_url = data.get("download_url") or "/exe-download"
+        if not download_url.startswith("http"):
+            download_url = CLOUD_AUTH_URL.rstrip("/") + download_url
+        filename = data.get("filename") or f"HIV取號_v{latest}.exe"
+
+        exe_dir = os.path.dirname(sys.executable)
+        new_exe_path = os.path.join(exe_dir, filename)
+        if os.path.exists(new_exe_path):
+            _log(f"🔔 新版 v{latest} 已下載過：{filename}（請關閉本工具切換至新版）")
+            return
+        _log(f"🔔 偵測到新版 v{latest}（目前 v{VERSION}），背景下載中…")
+        tmp_path = new_exe_path + ".downloading"
+        try:
+            req2 = urllib.request.Request(
+                download_url,
+                headers={"User-Agent": f"HIV-Auth-Client/{VERSION} (Windows)"},
+            )
+            with urllib.request.urlopen(req2, timeout=120) as resp:
+                with open(tmp_path, "wb") as f:
+                    while True:
+                        chunk = resp.read(64 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+            os.replace(tmp_path, new_exe_path)
+            _log(f"✅ 新版 v{latest} 已下載：{filename}")
+            _log(f"   → 請關閉本工具，將舊 EXE 刪除後雙擊新 EXE")
+        except Exception as e:
+            try: os.remove(tmp_path)
+            except Exception: pass
+            _log(f"⚠ 下載新版失敗：{e}")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return  # 還沒上傳，安靜
+        # 其他錯誤靜默
+    except Exception:
+        pass  # 網路問題等，靜默
 
 # ── v1.0.28：lazy import selenium → 啟動加速 ──
 # 不在 import 階段載入 selenium（拖慢 EXE 冷啟動約 1-2 秒）
@@ -3937,6 +4026,17 @@ def main():
         app.log(f"📁 輸出資料夾：{OUTPUT_DIR}")
         app.log(f"   舊版自動歸檔：{os.path.join(OUTPUT_DIR, 'old')}")
         app.log(f"   失敗快照：{os.path.join(OUTPUT_DIR, 'debug')}")
+
+        # v1.0.55：背景檢查更新（thread-safe log 透過 root.after 切回主執行緒）
+        def _safe_log(msg):
+            try: root.after(0, lambda m=msg: app.log(m))
+            except Exception: pass
+        threading.Thread(
+            target=check_and_download_update,
+            args=(_safe_log,),
+            daemon=True,
+        ).start()
+
         root.mainloop()
     except SystemExit:
         raise

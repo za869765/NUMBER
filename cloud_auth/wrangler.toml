@@ -9,6 +9,11 @@ database_name = "hiv-auth-db"
 database_id = "fee8cf82-4c08-4c51-b0bc-c3f207885c11"
 migrations_dir = "migrations"
 
+# v1.0.55：EXE 自動更新 — R2 bucket 存放最新 EXE + manifest.json
+[[r2_buckets]]
+binding = "EXE_STORE"
+bucket_name = "hiv-exe"
+
 # 管理員密碼（SHA-256 hex）— 用 wrangler secret 設定，不要寫在這
 # 部署前執行：npx wrangler secret put ADMIN_PASSWORD_HASH
 # 然後貼上：echo -n 你的管理員密碼 | sha256sum 的結果

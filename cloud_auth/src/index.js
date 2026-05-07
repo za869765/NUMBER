@@ -44,6 +44,13 @@ export default {
       if (path === '/admin/audit/daily' && request.method === 'POST') {
         return await handleAdminDaily(request, env);
       }
+      // v1.0.55 自動更新相關
+      if (path === '/version' && request.method === 'GET') {
+        return await handleVersion(request, env);
+      }
+      if (path === '/exe-download' && request.method === 'GET') {
+        return await handleExeDownload(request, env);
+      }
       // v1.0.53 錯誤回報相關
       if (path === '/report-error' && request.method === 'POST') {
         return await handleReportError(request, env);
@@ -335,6 +342,62 @@ async function handleAdminDaily(request, env) {
     .bind(`-${days} days`)
     .all();
   return jsonReply({ ok: true, days, rows: r.results || [] });
+}
+
+// ── v1.0.55 EXE 自動更新 ───────────────────────
+// /version       讀 R2 manifest.json，回傳 { latest, filename, size, updated_at }
+// /exe-download  讀 R2 latest.exe，回傳 binary 給 EXE 抓
+async function handleVersion(request, env) {
+  if (!env.EXE_STORE) {
+    return jsonReply({ ok: false, reason: 'R2 binding 未設' }, 503);
+  }
+  try {
+    const obj = await env.EXE_STORE.get('manifest.json');
+    if (!obj) {
+      return jsonReply({ ok: false, reason: '尚未上傳任何 EXE 版本' }, 404);
+    }
+    const text = await obj.text();
+    const data = JSON.parse(text);
+    return jsonReply({
+      ok: true,
+      latest: data.version || '',
+      filename: data.filename || 'HIV.exe',
+      size: data.size || 0,
+      updated_at: data.updated_at || '',
+      download_url: '/exe-download',
+    });
+  } catch (e) {
+    return jsonReply({ ok: false, reason: 'manifest 解析失敗' }, 500);
+  }
+}
+
+async function handleExeDownload(request, env) {
+  if (!env.EXE_STORE) {
+    return new Response('R2 binding 未設', { status: 503 });
+  }
+  const obj = await env.EXE_STORE.get('latest.exe');
+  if (!obj) {
+    return new Response('latest.exe 不存在', { status: 404 });
+  }
+  // 從 manifest 讀檔名（給 Content-Disposition）
+  let filename = 'HIV.exe';
+  try {
+    const m = await env.EXE_STORE.get('manifest.json');
+    if (m) {
+      const data = JSON.parse(await m.text());
+      if (data.filename) filename = data.filename;
+    }
+  } catch {}
+  // RFC 5987 編碼支援 UTF-8 檔名（中文）
+  const encName = encodeURIComponent(filename);
+  return new Response(obj.body, {
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${filename}"; filename*=UTF-8''${encName}`,
+      'Content-Length': String(obj.size),
+      'Cache-Control': 'public, max-age=300',
+    },
+  });
 }
 
 // ── v1.0.53 EXE 錯誤回報 ───────────────────────
@@ -1861,7 +1924,10 @@ async function loadErrors(){
       '<td class="mono" title="' + user + '">' + (user || '—') + '</td>' +
       '<td class="ip">' + (row.ip || '—') + '</td>' +
       '<td title="' + trigger + '">' + (trigger.length > 60 ? trigger.slice(0, 60) + '…' : trigger) + '</td>' +
-      '<td><button class="btn ghost tiny" onclick="window.viewErrorLog(' + row.id + ')">查看</button></td>';
+      '<td style="white-space:nowrap">' +
+        '<button class="btn ghost tiny" onclick="window.viewErrorLog(' + row.id + ')">查看</button> ' +
+        '<button class="btn ghost tiny" onclick="window.downloadErrorLog(' + row.id + ')">下載</button>' +
+      '</td>';
     tb.appendChild(tr);
     // 把整個 row data 留著供查看用
     tr.dataset.logText = row.log_text || '';
@@ -1875,12 +1941,11 @@ async function loadErrors(){
     tr.dataset.osVer = row.os_ver || '';
     tr.dataset.ip = row.ip || '';
   }
-  // 暴露 viewErrorLog
-  window.viewErrorLog = function(id){
+  // 共用：從 row 取出 metadata + log_text
+  function _gatherErrorRow(id){
     const tr = [...document.querySelectorAll('#error_table tbody tr')]
-      .find(tr => tr.querySelector('button[onclick*="viewErrorLog(' + id + ')"]'));
-    if (!tr) return;
-    const text = tr.dataset.logText || '(無內容)';
+      .find(tr => tr.querySelector('button[onclick*="(' + id + ')"]'));
+    if (!tr) return null;
     const meta = '時間 ' + fmt(tr.dataset.ts) + '\\n' +
                  '版本 ' + tr.dataset.version + '\\n' +
                  '電腦 ' + (tr.dataset.hostname || '—') + '\\n' +
@@ -1889,13 +1954,42 @@ async function loadErrors(){
                  'OS ' + (tr.dataset.osVer || '—') + '\\n' +
                  'IP ' + (tr.dataset.ip || '—') + ' (' + tr.dataset.country + ')\\n' +
                  'UA ' + tr.dataset.ua + '\\n\\n';
-    // 開新視窗顯示
+    return {
+      tr,
+      content: meta + (tr.dataset.logText || '(無內容)'),
+      hostname: tr.dataset.hostname || 'unknown',
+      ts: tr.dataset.ts || '',
+    };
+  }
+
+  // 下載 .txt
+  window.downloadErrorLog = function(id){
+    const r = _gatherErrorRow(id);
+    if (!r) return;
+    const blob = new Blob([r.content], {type: 'text/plain;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    const safeHost = r.hostname.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const dt = r.ts.slice(0, 10);
+    a.download = 'error_' + id + '_' + safeHost + '_' + dt + '.txt';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      URL.revokeObjectURL(a.href);
+      a.remove();
+    }, 100);
+  };
+
+  // 開新視窗看
+  window.viewErrorLog = function(id){
+    const r = _gatherErrorRow(id);
+    if (!r) return;
     const w = window.open('', '_blank', 'width=900,height=600');
     if (!w) return toast('彈窗被擋了，請允許彈窗', 'err');
     w.document.title = '錯誤 log #' + id;
     const pre = w.document.createElement('pre');
     pre.style.cssText = 'font:12px ui-monospace,Consolas,monospace;background:#14181f;color:#c4cbd6;padding:16px;margin:0;white-space:pre-wrap;word-break:break-word;min-height:100vh';
-    pre.textContent = meta + text;
+    pre.textContent = r.content;
     w.document.body.style.margin = '0';
     w.document.body.appendChild(pre);
   };
