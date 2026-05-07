@@ -507,26 +507,34 @@ async function handleAdminResetData(request, env) {
 // /version       讀 R2 manifest.json，回傳 { latest, filename, size, updated_at }
 // /exe-download  讀 R2 latest.exe，回傳 binary 給 EXE 抓
 async function handleVersion(request, env) {
+  // v1.0.60：強制 no-store 避免 Cloudflare 邊緣節點快取舊 manifest
+  const headers = {
+    ...JSON_HDR,
+    'Cache-Control': 'no-store, no-cache, must-revalidate',
+  };
   if (!env.EXE_STORE) {
-    return jsonReply({ ok: false, reason: 'R2 binding 未設' }, 503);
+    return new Response(JSON.stringify({ ok: false, reason: 'R2 binding 未設' }),
+      { status: 503, headers });
   }
   try {
     const obj = await env.EXE_STORE.get('manifest.json');
     if (!obj) {
-      return jsonReply({ ok: false, reason: '尚未上傳任何 EXE 版本' }, 404);
+      return new Response(JSON.stringify({ ok: false, reason: '尚未上傳任何 EXE 版本' }),
+        { status: 404, headers });
     }
     const text = await obj.text();
     const data = JSON.parse(text);
-    return jsonReply({
+    return new Response(JSON.stringify({
       ok: true,
       latest: data.version || '',
       filename: data.filename || 'HIV.exe',
       size: data.size || 0,
       updated_at: data.updated_at || '',
       download_url: '/exe-download',
-    });
+    }), { headers });
   } catch (e) {
-    return jsonReply({ ok: false, reason: 'manifest 解析失敗' }, 500);
+    return new Response(JSON.stringify({ ok: false, reason: 'manifest 解析失敗' }),
+      { status: 500, headers });
   }
 }
 

@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.59"
+VERSION = "1.0.60"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -4197,7 +4197,7 @@ def show_password_gate(parent):
                 CLOUD_AUTH_URL.rstrip("/") + "/version",
                 headers={"User-Agent": f"HIV-Auth-Client/{VERSION} (Windows)"},
             )
-            with urllib.request.urlopen(req, timeout=6) as resp:
+            with urllib.request.urlopen(req, timeout=3) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             if not data.get("ok"):
                 dlg.after(0, lambda: latest_var.set("雲端版本：尚未上傳"))
@@ -4295,8 +4295,7 @@ def main():
         app._update_counts()
         app.log(f"📁 log 寫入：{log_path}")
         app.log(f"📁 輸出資料夾：{OUTPUT_DIR}")
-        app.log(f"   舊版自動歸檔：{os.path.join(OUTPUT_DIR, 'old')}")
-        app.log(f"   失敗快照：{os.path.join(OUTPUT_DIR, 'debug')}")
+        # v1.0.60：拿掉「舊版自動歸檔」「失敗快照」兩行 log（使用者沒在用、佔版面）
 
         # v1.0.55：背景檢查更新（thread-safe log 透過 root.after 切回主執行緒）
         def _safe_log(msg):
