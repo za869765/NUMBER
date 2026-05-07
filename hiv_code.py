@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.55"
+VERSION = "1.0.56"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -2577,26 +2577,8 @@ class App:
         if len(log_text) > 60000:
             log_text = log_text[-60000:]
 
-        # v1.0.54 機器識別資訊
-        import socket, uuid
-        try:
-            hostname = socket.gethostname() or ""
-        except Exception:
-            hostname = ""
-        try:
-            win_user = (os.environ.get("USERNAME") or os.environ.get("USER") or "")
-        except Exception:
-            win_user = ""
-        try:
-            mac_int = uuid.getnode()
-            mac = ":".join(f"{(mac_int >> i) & 0xff:02x}" for i in (40, 32, 24, 16, 8, 0))
-        except Exception:
-            mac = ""
-        try:
-            v = sys.getwindowsversion()
-            os_ver = f"Windows {v.major}.{v.minor}.{v.build}"
-        except Exception:
-            os_ver = ""
+        # v1.0.54/56 機器識別資訊（共用 _machine_info）
+        info = _machine_info()
 
         def _bg():
             import urllib.request, urllib.error
@@ -2605,10 +2587,7 @@ class App:
                     "version": VERSION,
                     "trigger": (trigger_msg or "")[:200],
                     "log_text": log_text,
-                    "hostname": hostname[:64],
-                    "win_user": win_user[:64],
-                    "mac": mac[:32],
-                    "os_ver": os_ver[:64],
+                    **info,  # hostname/win_user/mac/os_ver
                 }).encode("utf-8")
                 req = urllib.request.Request(
                     CLOUD_AUTH_URL.rstrip("/") + "/report-error",
@@ -3842,14 +3821,39 @@ class App:
 # 啟動時連線 CLOUD_AUTH_URL/verify 驗證密碼。
 # 完全不允許離線：連不到網路或 worker 回 ok=false 即拒絕。
 # 管理員可在 cloud_auth/admin 改密碼或停用所有 EXE。
+def _machine_info():
+    """v1.0.56：取機器識別資訊，給 cloud_verify 與 _maybe_report_error 共用
+    /verify 也帶上 hostname，admin UI 「7 天活躍機器」用 COUNT(DISTINCT hostname) 統計"""
+    import socket, uuid
+    info = {"hostname": "", "win_user": "", "mac": "", "os_ver": ""}
+    try: info["hostname"] = (socket.gethostname() or "")[:64]
+    except Exception: pass
+    try: info["win_user"] = (os.environ.get("USERNAME") or os.environ.get("USER") or "")[:64]
+    except Exception: pass
+    try:
+        mac_int = uuid.getnode()
+        info["mac"] = ":".join(f"{(mac_int >> i) & 0xff:02x}" for i in (40, 32, 24, 16, 8, 0))
+    except Exception: pass
+    try:
+        v = sys.getwindowsversion()
+        info["os_ver"] = f"Windows {v.major}.{v.minor}.{v.build}"[:64]
+    except Exception: pass
+    return info
+
+
 def cloud_verify(password):
     """回傳 (ok: bool, reason: str)。reason 直接顯示給使用者。
     v1.0.41：加 User-Agent，繞過 Cloudflare 對 Python-urllib 的 1010 阻擋
     v1.0.43：連線錯誤自動 retry 1 次（隔 1.5 秒），緩解現場 4G 抖動。
-             伺服器明確拒絕（HTTP 4xx）不 retry，避免幫攻擊者放大試誤。"""
+             伺服器明確拒絕（HTTP 4xx）不 retry，避免幫攻擊者放大試誤。
+    v1.0.56：body 多帶 hostname（給 admin UI 算活躍機器數）"""
     import urllib.request
     import urllib.error
-    body = json.dumps({"password": password}).encode("utf-8")
+    info = _machine_info()
+    body = json.dumps({
+        "password": password,
+        "hostname": info["hostname"],  # v1.0.56：給 audit COUNT(DISTINCT hostname) 用
+    }).encode("utf-8")
 
     def _once():
         req = urllib.request.Request(

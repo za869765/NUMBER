@@ -96,30 +96,32 @@ async function handleVerify(request, env) {
   // v1.0.43 H3：先擋頻繁試誤
   const ip = request.headers.get('cf-connecting-ip') || '';
   if (await isRateLimited(env, ip)) {
-    await logAudit(request, env, false, '速率限制');
+    await logAudit(request, env, false, '速率限制', '');
     return jsonReply({ ok: false, reason: '嘗試太頻繁，請稍後（約 1 分鐘）再試' }, 429);
   }
   let body;
   try {
     body = await request.json();
   } catch {
-    await logAudit(request, env, false, '格式錯誤');
+    await logAudit(request, env, false, '格式錯誤', '');
     return jsonReply({ ok: false, reason: '格式錯誤' }, 400);
   }
   const pwd = (body && body.password) || '';
+  // v1.0.56：取 hostname（從 body）寫入 audit，「7 天活躍機器」用它去重
+  const hostname = String((body && body.hostname) || '').slice(0, 64);
   if (!pwd) {
-    await logAudit(request, env, false, '密碼空白');
+    await logAudit(request, env, false, '密碼空白', hostname);
     return jsonReply({ ok: false, reason: '密碼空白' }, 400);
   }
   const row = await env.DB.prepare(
     'SELECT password_hash, message, killed FROM auth WHERE id = 1'
   ).first();
   if (!row || !row.password_hash) {
-    await logAudit(request, env, false, '伺服器未設密碼');
+    await logAudit(request, env, false, '伺服器未設密碼', hostname);
     return jsonReply({ ok: false, reason: '伺服器尚未設定密碼，請聯絡管理員' }, 503);
   }
   if (row.killed) {
-    await logAudit(request, env, false, 'killed');
+    await logAudit(request, env, false, 'killed', hostname);
     return jsonReply({ ok: false, reason: row.message || '本服務已停用，請聯絡管理員' }, 403);
   }
   // v1.0.43 M1：PBKDF2 驗證；老 SHA-256 紀錄成功時透明遷移
@@ -133,15 +135,16 @@ async function handleVerify(request, env) {
         ).bind(newHash).run();
       } catch { /* 遷移失敗不影響本次登入 */ }
     }
-    await logAudit(request, env, true, '');
+    await logAudit(request, env, true, '', hostname);
     return jsonReply({ ok: true });
   }
-  await logAudit(request, env, false, '密碼錯誤');
+  await logAudit(request, env, false, '密碼錯誤', hostname);
   return jsonReply({ ok: false, reason: '密碼錯誤' }, 401);
 }
 
 // 寫一筆 audit log（fire-and-forget，失敗不影響主流程）
-async function logAudit(request, env, ok, reason) {
+// v1.0.56：多吃 hostname 參數
+async function logAudit(request, env, ok, reason, hostname) {
   try {
     const ip = request.headers.get('cf-connecting-ip') || '';
     const country =
@@ -151,9 +154,9 @@ async function logAudit(request, env, ok, reason) {
     const ua = (request.headers.get('user-agent') || '').slice(0, 200);
     const ts = new Date().toISOString();
     await env.DB.prepare(
-      'INSERT INTO audit (ts, ip, country, ua, ok, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6)'
+      'INSERT INTO audit (ts, ip, country, ua, ok, reason, hostname) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)'
     )
-      .bind(ts, ip, country, ua, ok ? 1 : 0, reason || '')
+      .bind(ts, ip, country, ua, ok ? 1 : 0, reason || '', hostname || '')
       .run();
   } catch {
     /* swallow */
@@ -285,12 +288,13 @@ async function handleAdminStats(request, env) {
     return jsonReply({ ok: false, reason: '管理員密碼錯誤' }, 401);
   }
   const stats = {};
-  // 24h
+  // 24h（v1.0.56：uniq_machine = 不同 hostname；uniq_ip 保留作備援）
   const r24 = await env.DB.prepare(
     `SELECT COUNT(*) AS total,
             SUM(CASE WHEN ok=1 THEN 1 ELSE 0 END) AS ok_cnt,
             SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END) AS fail_cnt,
-            COUNT(DISTINCT ip) AS uniq_ip
+            COUNT(DISTINCT ip) AS uniq_ip,
+            COUNT(DISTINCT NULLIF(hostname, '')) AS uniq_machine
      FROM audit WHERE ts >= datetime('now', '-1 day')`
   ).first();
   // 7d
@@ -298,7 +302,8 @@ async function handleAdminStats(request, env) {
     `SELECT COUNT(*) AS total,
             SUM(CASE WHEN ok=1 THEN 1 ELSE 0 END) AS ok_cnt,
             SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END) AS fail_cnt,
-            COUNT(DISTINCT ip) AS uniq_ip
+            COUNT(DISTINCT ip) AS uniq_ip,
+            COUNT(DISTINCT NULLIF(hostname, '')) AS uniq_machine
      FROM audit WHERE ts >= datetime('now', '-7 days')`
   ).first();
   // top IPs（過去 7 天）
@@ -332,6 +337,7 @@ async function handleAdminDaily(request, env) {
             SUM(CASE WHEN ok=1 THEN 1 ELSE 0 END) AS ok_cnt,
             SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END) AS fail_cnt,
             COUNT(DISTINCT ip) AS uniq_ip,
+            COUNT(DISTINCT NULLIF(hostname, '')) AS uniq_machine,
             MIN(ts) AS first_ts,
             MAX(ts) AS last_ts
      FROM audit
@@ -801,12 +807,13 @@ const ADMIN_HTML = `<!doctype html>
     margin-bottom: 14px;
     scroll-margin-top: 24px;
   }
-  /* v1.0.55 accordion：section-head 變成可點 toggle，預設縮起 */
+  /* v1.0.55/56 accordion：section-head 用 accent-soft 底色，與內部白色 card 明顯分層 */
   .section-head{
     display: flex; align-items: center; gap: 10px;
-    padding: 12px 16px;
-    background: var(--surface);
+    padding: 14px 18px;
+    background: var(--accent-soft);
     border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-sm);
     cursor: pointer;
@@ -814,16 +821,22 @@ const ADMIN_HTML = `<!doctype html>
     transition: background .15s, box-shadow .15s;
   }
   .section-head:hover{
-    background: var(--surface-2);
+    background: var(--accent-soft);
+    box-shadow: 0 2px 6px rgba(20,30,50,.10);
   }
   .section-title{
-    font-size: 14px; font-weight: 600; margin: 0;
-    color: var(--ink);
+    font-size: 15px; font-weight: 700; margin: 0;
+    color: var(--accent-2);
     letter-spacing: 0.2px;
   }
   .section-sub{
-    font-size: 12px; color: var(--ink-3);
+    font-size: 12px; color: var(--ink-2);
     margin-left: 2px;
+    opacity: 0.85;
+  }
+  .section-toggle{
+    color: var(--accent-2);
+    opacity: 0.7;
   }
   .section-toggle{
     margin-left: auto;
@@ -2211,7 +2224,8 @@ async function loadOverview(){
       setN('stat_today', r24.total);
       setN('stat_week_ok', r7.ok_cnt);
       setN('stat_week_fail', r7.fail_cnt);
-      setN('stat_unique_ip', r7.uniq_ip);
+      // v1.0.56：「7 天活躍機器」改用 uniq_machine（COUNT DISTINCT hostname），fallback uniq_ip
+      setN('stat_unique_ip', r7.uniq_machine != null ? r7.uniq_machine : r7.uniq_ip);
     }
   } catch {}
   // 最近 5 筆活動
