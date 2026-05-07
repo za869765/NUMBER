@@ -51,12 +51,15 @@ export default {
       if (path === '/exe-download' && request.method === 'GET') {
         return await handleExeDownload(request, env);
       }
-      // v1.0.59 機器清單 + 後台資料清 0
+      // v1.0.59 機器清單 + 後台資料清 0 + 批次回報
       if (path === '/admin/machines' && request.method === 'POST') {
         return await handleAdminMachines(request, env);
       }
       if (path === '/admin/reset-data' && request.method === 'POST') {
         return await handleAdminResetData(request, env);
+      }
+      if (path === '/report-batch' && request.method === 'POST') {
+        return await handleReportBatch(request, env);
       }
       // v1.0.53 錯誤回報相關
       if (path === '/report-error' && request.method === 'POST') {
@@ -326,6 +329,15 @@ async function handleAdminStats(request, env) {
     ).first();
     err7 = (re && re.n) || 0;
   } catch { /* error_reports 表不存在就 0 */ }
+  // v1.0.59：今天精確產生代碼數（從 batches 表 SUM count）
+  let todayCodes = 0;
+  try {
+    const rb = await env.DB.prepare(
+      `SELECT IFNULL(SUM(count), 0) AS n FROM batches
+       WHERE ts >= datetime('now', '-1 day')`
+    ).first();
+    todayCodes = (rb && rb.n) || 0;
+  } catch { /* batches 表不存在就 0 */ }
   // top IPs（過去 7 天）
   const topIps = await env.DB.prepare(
     `SELECT ip, country,
@@ -344,6 +356,8 @@ async function handleAdminStats(request, env) {
     // v1.0.58 新增
     machines_all: (rAll && rAll.uniq_machine_all) || 0,
     error_reports_7d: err7,
+    // v1.0.59 新增：今日精確產生代碼總數（從 batches）
+    today_codes: todayCodes,
   });
 }
 
@@ -371,6 +385,41 @@ async function handleAdminDaily(request, env) {
     .bind(`-${days} days`)
     .all();
   return jsonReply({ ok: true, days, rows: r.results || [] });
+}
+
+// ── v1.0.59 EXE 批次完成上報（精確代碼數） ──────
+async function handleReportBatch(request, env) {
+  let body;
+  try { body = await request.json(); }
+  catch { return jsonReply({ ok: false, reason: '格式錯誤' }, 400); }
+
+  const count = parseInt(body && body.count, 10);
+  if (isNaN(count) || count < 0 || count > 10000) {
+    return jsonReply({ ok: false, reason: 'count 不合法' }, 400);
+  }
+  const duration = parseInt(body && body.duration_sec, 10) || 0;
+  const status = String((body && body.status) || '').slice(0, 16);
+  const version = String((body && body.version) || '').slice(0, 32);
+  const hostname = String((body && body.hostname) || '').slice(0, 64);
+  const win_user = String((body && body.win_user) || '').slice(0, 64);
+  const mac = String((body && body.mac) || '').slice(0, 32);
+  const os_ver = String((body && body.os_ver) || '').slice(0, 64);
+  const ip = request.headers.get('cf-connecting-ip') || '';
+  const country = (request.cf && request.cf.country) ||
+                   request.headers.get('cf-ipcountry') || '';
+  const ts = new Date().toISOString();
+
+  try {
+    await env.DB.prepare(
+      `INSERT INTO batches
+        (ts, hostname, win_user, mac, os_ver, ip, country, version, count, duration_sec, status)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
+    ).bind(ts, hostname, win_user, mac, os_ver, ip, country, version,
+            count, duration, status).run();
+  } catch (e) {
+    return jsonReply({ ok: false, reason: '儲存失敗' }, 500);
+  }
+  return jsonReply({ ok: true });
 }
 
 // ── v1.0.59 機器清單（per-hostname 統計）───────
@@ -416,6 +465,22 @@ async function handleAdminMachines(request, env) {
       m.error_cnt = 0;
       m.win_user = m.mac = m.os_ver = '';
     }
+    // v1.0.59：累計產生代碼數 + 批次次數（從 batches）
+    try {
+      const cb = await env.DB.prepare(
+        `SELECT IFNULL(SUM(count), 0) AS total_codes,
+                COUNT(*) AS batch_cnt,
+                MAX(ts)  AS last_batch_ts
+         FROM batches WHERE hostname=?1`
+      ).bind(m.hostname).first();
+      m.total_codes = (cb && cb.total_codes) || 0;
+      m.batch_cnt   = (cb && cb.batch_cnt) || 0;
+      m.last_batch_ts = (cb && cb.last_batch_ts) || '';
+    } catch {
+      m.total_codes = 0;
+      m.batch_cnt = 0;
+      m.last_batch_ts = '';
+    }
   }
   return jsonReply({ ok: true, machines: rows });
 }
@@ -425,7 +490,7 @@ async function handleAdminResetData(request, env) {
   if (!(await checkAdmin(body.admin_pwd, env))) {
     return jsonReply({ ok: false, reason: '管理員密碼錯誤' }, 401);
   }
-  const tables = ['audit', 'error_reports'];
+  const tables = ['audit', 'error_reports', 'batches'];
   const results = {};
   for (const t of tables) {
     try {
@@ -1586,13 +1651,14 @@ const ADMIN_HTML = `<!doctype html>
               <table id="machines_table">
                 <thead>
                   <tr>
-                    <th style="width:140px">電腦名稱</th>
-                    <th style="width:90px">使用者</th>
-                    <th style="width:60px">版本</th>
-                    <th style="width:80px;text-align:right">登入成功</th>
-                    <th style="width:70px;text-align:right">失敗</th>
-                    <th style="width:80px;text-align:right">錯誤回報</th>
-                    <th style="width:120px">最後使用</th>
+                    <th style="width:135px">電腦名稱</th>
+                    <th style="width:85px">使用者</th>
+                    <th style="width:55px">版本</th>
+                    <th style="width:75px;text-align:right">登入成功</th>
+                    <th style="width:60px;text-align:right">失敗</th>
+                    <th style="width:80px;text-align:right">產生代碼</th>
+                    <th style="width:75px;text-align:right">錯誤回報</th>
+                    <th style="width:115px">最後使用</th>
                     <th>細節</th>
                   </tr>
                 </thead>
@@ -2187,7 +2253,7 @@ async function loadMachines(){
   const machines = r.machines || [];
   tb.innerHTML = '';
   if (!machines.length){
-    tb.innerHTML = '<tr class="empty-row"><td colspan="8">尚無電腦使用紀錄</td></tr>';
+    tb.innerHTML = '<tr class="empty-row"><td colspan="9">尚無電腦使用紀錄</td></tr>';
     return;
   }
   for (const m of machines){
@@ -2195,6 +2261,7 @@ async function loadMachines(){
     const winUser = (m.win_user || '—').replace(/</g, '&lt;');
     const host = (m.hostname || '—').replace(/</g, '&lt;');
     const errCnt = m.error_cnt || 0;
+    const totalCodes = m.total_codes || 0;
     const tr = document.createElement('tr');
     tr.innerHTML =
       '<td class="mono">' + host + '</td>' +
@@ -2202,6 +2269,7 @@ async function loadMachines(){
       '<td class="mono">' + ver + '</td>' +
       '<td class="num ok">' + (m.ok_cnt || 0) + '</td>' +
       '<td class="num bad">' + (m.fail_cnt || 0) + '</td>' +
+      '<td class="num" style="color:var(--accent-2);font-weight:700">' + totalCodes + '</td>' +
       '<td class="num" style="color:' + (errCnt > 0 ? 'var(--bad)' : 'var(--ink-3)') + '">' + errCnt + '</td>' +
       '<td class="ts">' + fmt(m.last_seen) + '</td>' +
       '<td><button class="btn ghost tiny" onclick="window.viewMachine(\\'' + host.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'") + '\\')">細節</button></td>';
@@ -2224,11 +2292,15 @@ async function loadMachines(){
       '版本      ' + ver + '\\n' +
       'MAC       ' + (m.mac || '—') + '\\n' +
       'OS        ' + (m.os_ver || '—') + '\\n' +
-      '\\n=== 統計 ===\\n' +
+      '\\n=== 登入統計 ===\\n' +
       '登入成功  ' + (m.ok_cnt || 0) + '\\n' +
       '登入失敗  ' + (m.fail_cnt || 0) + '\\n' +
       '錯誤回報  ' + (m.error_cnt || 0) + '\\n' +
       '不同 IP   ' + (m.ip_cnt || 0) + '\\n' +
+      '\\n=== 批次取號（精確） ===\\n' +
+      '累計批次  ' + (m.batch_cnt || 0) + '\\n' +
+      '累計代碼  ' + (m.total_codes || 0) + '\\n' +
+      '最後批次  ' + fmt(m.last_batch_ts) + '\\n' +
       '\\n=== 時間 ===\\n' +
       '首次出現  ' + fmt(m.first_seen) + '\\n' +
       '最後使用  ' + fmt(m.last_seen) + '\\n' +
@@ -2478,13 +2550,14 @@ async function loadOverview(){
         const el = document.getElementById(id);
         if (el) el.textContent = (n == null ? 0 : n);
       };
-      // v1.0.58：4 stat 重新定義
+      // v1.0.58/59：4 stat 重新定義
       setN('stat_today', r24.total);            // 今日登入：24h 全部嘗試
-      setN('stat_today_ok', r24.ok_cnt);        // 今日已產生總筆數：24h 成功登入（每次成功 ≈ 一個批次 session）
-      setN('stat_err_7d', s.error_reports_7d);  // 7 天錯誤回報：error_reports 表 7d
-      setN('stat_machines_all', s.machines_all); // 已使用電腦數：累計不同 hostname
+      // v1.0.59：今日已產生總筆數 改用 batches 真實代碼數
+      setN('stat_today_ok', s.today_codes);
+      setN('stat_err_7d', s.error_reports_7d);  // 7 天錯誤回報
+      setN('stat_machines_all', s.machines_all); // 已使用電腦數
 
-      // v1.0.59：游標停留時的明細 tooltip（用 title 屬性最簡單）
+      // 游標停留時的明細 tooltip
       const setTitle = (id, t) => {
         const el = document.getElementById(id);
         if (el) el.title = t;
@@ -2497,12 +2570,13 @@ async function loadOverview(){
         '不同 IP ' + (r24.uniq_ip || 0) + '\\n' +
         '不同電腦 ' + (r24.uniq_machine || 0));
       setTitle('cell_today_ok',
-        '24 小時成功登入：每次代表一台 EXE 開始一個批次 session\\n' +
-        '由於 Worker 沒攔截 EXE 內部的代碼產生，這數字 ≈ 批次次數\\n' +
-        '真實代碼總數 = 此次數 × 每批次平均產出（依使用者設定）');
+        '24 小時內所有 EXE 上報的精確代碼產出總數\\n' +
+        '─────────────────\\n' +
+        '由 EXE 批次結束時上報 /report-batch 累計\\n' +
+        '至「電腦清單」分頁可看每台累計');
       setTitle('cell_err_7d',
         '7 天 error_reports 累計\\n' +
-        'EXE 偵測紅色錯誤 log 自動上傳的回報，至「錯誤回報」分頁看完整內容');
+        'EXE 偵測紅色錯誤 log 自動上傳，至「錯誤回報」分頁看完整內容');
       setTitle('cell_machines',
         '累計不同 hostname 數（不限時間）\\n' +
         '至「電腦清單」分頁看每台明細');

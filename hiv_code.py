@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.58"
+VERSION = "1.0.59"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -3754,6 +3754,8 @@ class App:
                  f"/ 每筆間隔 {dly.between_lo}~{dly.between_hi}s / 逾時 {dly.wait_timeout}s")
         # v1.0.14 統計起始時間
         run_start_ts = time.time()
+        self._batch_start_ts = run_start_ts  # v1.0.59 給 _finish 算 duration 用
+        self._batch_target = len(pool)        # v1.0.59 給 status 判斷用
         completed = 0
         worker = HivaWorker(self.log, self.status, lambda code: None, self.stop_evt, delay_cfg=dly)
         if not worker.start_browser():
@@ -3902,6 +3904,53 @@ class App:
                     self.single_result_var.set("✗ 取號失敗，請看 log")
         except Exception:
             pass
+        # v1.0.59 批次結束 → 上報雲端（精確產出代碼數）
+        try: self._report_batch_done()
+        except Exception: pass
+
+    def _report_batch_done(self):
+        """v1.0.59：批次結束精確上報該次 EXE 產出代碼數。
+        每台機器累計就是 SUM(count) by hostname。背景 thread，失敗無聲。"""
+        count = len(getattr(self, "results", []) or [])
+        target = getattr(self, "_batch_target", 0)
+        start_ts = getattr(self, "_batch_start_ts", 0)
+        duration = int(time.time() - start_ts) if start_ts else 0
+        # 判斷狀態：完成 vs 中斷
+        if target > 0 and count >= target:
+            status = "completed"
+        elif self.stop_evt.is_set():
+            status = "aborted"
+        else:
+            status = "partial"
+        # count == 0 不送（沒意義）
+        if count == 0 and status != "aborted":
+            return
+        info = _machine_info()
+
+        def _bg():
+            import urllib.request, urllib.error
+            try:
+                body = json.dumps({
+                    "version": VERSION,
+                    "count": count,
+                    "duration_sec": duration,
+                    "status": status,
+                    **info,  # hostname/win_user/mac/os_ver
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    CLOUD_AUTH_URL.rstrip("/") + "/report-batch",
+                    data=body,
+                    headers={
+                        "Content-Type": "application/json;charset=utf-8",
+                        "User-Agent": f"HIV-Auth-Client/{VERSION} (Windows)",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    resp.read()
+            except Exception:
+                pass  # 上報失敗不影響使用者
+        threading.Thread(target=_bg, daemon=True).start()
 
 
 # ── v1.0.39 雲端授權閘 ───────────────────────────────
