@@ -196,7 +196,7 @@ async function handleAdminUpdate(request, env) {
     )
       .bind(hash, value, now)
       .run();
-    return jsonReply({ ok: true, msg: '主密碼已更新' });
+    return jsonReply({ ok: true, msg: '程式授權密碼已更新' });
   }
 
   if (action === 'set_admin_password') {
@@ -1081,7 +1081,7 @@ const ADMIN_HTML = `<!doctype html>
                 <div class="v" id="s_kill">—</div>
               </div>
               <div class="state-cell">
-                <div class="k">主密碼（EXE 登入用）</div>
+                <div class="k">程式授權密碼（EXE 登入用）</div>
                 <div class="v">
                   <span class="pwd-display" id="s_pwd_plain">—</span>
                   <button class="btn ghost tiny" onclick="togglePwd('pwd')">顯示</button>
@@ -1112,14 +1112,14 @@ const ADMIN_HTML = `<!doctype html>
 
         <div class="card">
           <div class="card-header">
-            <h3>主密碼 — EXE 登入用</h3>
+            <h3>程式授權密碼 — EXE 登入用</h3>
             <span class="help">改完後所有 EXE 立刻使用新密碼</span>
           </div>
           <div class="card-body">
             <div class="field-row">
               <div class="field">
-                <label for="newpwd">新主密碼（至少 4 字）</label>
-                <input id="newpwd" type="password" placeholder="輸入新主密碼">
+                <label for="newpwd">新程式授權密碼（至少 4 字）</label>
+                <input id="newpwd" type="password" placeholder="輸入新程式授權密碼">
               </div>
               <button class="btn" onclick="setPwd()" id="btn_setpwd">送出</button>
             </div>
