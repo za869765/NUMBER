@@ -1303,6 +1303,38 @@ const ADMIN_HTML = `<!doctype html>
             </div>
           </div>
         </div>
+        <!-- v1.0.57 最新 EXE 版本資訊（從 R2 manifest 拉） -->
+        <div class="card">
+          <div class="card-header">
+            <h3>最新 EXE 版本</h3>
+            <span class="help">所有跑舊版的 EXE 啟動時自動下載這個</span>
+          </div>
+          <div class="card-body">
+            <div class="state-grid" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
+              <div class="state-cell">
+                <div class="k">線上版本</div>
+                <div class="v" style="font-size: 18px; font-weight: 700; color: var(--accent-2); font-variant-numeric: tabular-nums;">
+                  <span id="exe_latest">—</span>
+                </div>
+              </div>
+              <div class="state-cell">
+                <div class="k">檔名</div>
+                <div class="v mono" style="font-size: 12px;" id="exe_filename">—</div>
+              </div>
+              <div class="state-cell">
+                <div class="k">大小</div>
+                <div class="v mono" style="font-size: 13px;" id="exe_size">—</div>
+              </div>
+              <div class="state-cell">
+                <div class="k">最近上傳</div>
+                <div class="v ts" style="font-size: 12px;" id="exe_updated">—</div>
+              </div>
+            </div>
+            <p style="margin-top:10px;font-size:11.5px;color:var(--ink-3);line-height:1.55">
+              💡 升版 SOP：build EXE → 寫 manifest → <code class="mono">wrangler r2 object put</code> 上傳 latest.exe + manifest.json
+            </p>
+          </div>
+        </div>
         <!-- 設定狀態 -->
         <div class="card">
           <div class="card-body">
@@ -2226,6 +2258,30 @@ async function loadOverview(){
       setN('stat_week_fail', r7.fail_cnt);
       // v1.0.56：「7 天活躍機器」改用 uniq_machine（COUNT DISTINCT hostname），fallback uniq_ip
       setN('stat_unique_ip', r7.uniq_machine != null ? r7.uniq_machine : r7.uniq_ip);
+    }
+  } catch {}
+  // v1.0.57：拉最新 EXE 版本資訊
+  try {
+    const r = await fetch('/version', {method: 'GET'});
+    if (r.ok){
+      const v = await r.json();
+      if (v && v.ok){
+        const setT = (id, val) => {
+          const el = document.getElementById(id);
+          if (el) el.textContent = val || '—';
+        };
+        setT('exe_latest', 'v' + (v.latest || ''));
+        setT('exe_filename', v.filename || '—');
+        const mb = v.size ? (v.size / 1024 / 1024).toFixed(1) + ' MB' : '—';
+        setT('exe_size', mb);
+        setT('exe_updated', fmt(v.updated_at));
+      } else {
+        const set = (id, t) => { const el = document.getElementById(id); if (el) el.textContent = t; };
+        set('exe_latest', '尚未上傳');
+        set('exe_filename', '—');
+        set('exe_size', '—');
+        set('exe_updated', '—');
+      }
     }
   } catch {}
   // 最近 5 筆活動

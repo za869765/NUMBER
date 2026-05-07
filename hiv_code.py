@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.56"
+VERSION = "1.0.57"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -1993,56 +1993,54 @@ class App:
                                        foreground="#7d8696", font=("Consolas", 9))
         self._speed_label.pack(side="left", padx=(12, 0))
 
-        # 等待逾時（總是可見，這是常用、跟連線速度有關）
-        ttk.Label(speed, text="等待逾時：").grid(row=1, column=0, padx=4, pady=4, sticky="w")
-        self.dly_timeout = tk.IntVar(value=30)
-        self._mk_int_entry(speed, self.dly_timeout, width=6).grid(row=1, column=1, padx=2)
-        ttk.Label(speed, text="秒  （多人連線會慢，建議 30+）",
-                  foreground="#666").grid(row=1, column=2, columnspan=3, padx=4, sticky="w")
-
-        # 進階區間設定（disclosure：點開才顯示 6 個 entry）
+        # 進階區間設定（disclosure：點開才顯示 6 個 entry + 等待逾時）
+        # v1.0.57：等待逾時也移進 adv，預設只看到 chip
         self._adv_visible = False
-        self._adv_btn_text = tk.StringVar(value="▶ 進階區間設定（自訂秒數）")
+        self._adv_btn_text = tk.StringVar(value="▶ 進階設定（自訂秒數 / 逾時）")
         adv_btn = ttk.Button(speed, textvariable=self._adv_btn_text,
                               command=lambda: _toggle_adv())
-        adv_btn.grid(row=2, column=0, columnspan=5, padx=4, pady=(6, 4), sticky="w")
+        adv_btn.grid(row=1, column=0, columnspan=5, padx=4, pady=(6, 4), sticky="w")
 
         adv_fr = ttk.Frame(speed)
-        # 不 grid → 預設隱藏
-
-        # 動作延遲
-        ttk.Label(adv_fr, text="動作延遲：").grid(row=0, column=0, padx=4, pady=2, sticky="w")
         self.dly_act_lo = tk.DoubleVar(value=0.3)
         self.dly_act_hi = tk.DoubleVar(value=0.7)
+        self.dly_page_lo = tk.DoubleVar(value=0.8)
+        self.dly_page_hi = tk.DoubleVar(value=1.5)
+        self.dly_btw_lo = tk.DoubleVar(value=1.5)
+        self.dly_btw_hi = tk.DoubleVar(value=3.0)
+        self.dly_timeout = tk.IntVar(value=30)
+        # 動作延遲
+        ttk.Label(adv_fr, text="動作延遲：").grid(row=0, column=0, padx=4, pady=2, sticky="w")
         self._mk_float_entry(adv_fr, self.dly_act_lo, width=6).grid(row=0, column=1, padx=2)
         ttk.Label(adv_fr, text="~").grid(row=0, column=2)
         self._mk_float_entry(adv_fr, self.dly_act_hi, width=6).grid(row=0, column=3, padx=2)
         ttk.Label(adv_fr, text="（每點 radio/select 後）", foreground="#666").grid(row=0, column=4, padx=8, sticky="w")
         # 頁面切換延遲
         ttk.Label(adv_fr, text="頁面切換延遲：").grid(row=1, column=0, padx=4, pady=2, sticky="w")
-        self.dly_page_lo = tk.DoubleVar(value=0.8)
-        self.dly_page_hi = tk.DoubleVar(value=1.5)
         self._mk_float_entry(adv_fr, self.dly_page_lo, width=6).grid(row=1, column=1, padx=2)
         ttk.Label(adv_fr, text="~").grid(row=1, column=2)
         self._mk_float_entry(adv_fr, self.dly_page_hi, width=6).grid(row=1, column=3, padx=2)
         ttk.Label(adv_fr, text="（按下一步後）", foreground="#666").grid(row=1, column=4, padx=8, sticky="w")
         # 每筆間隔
         ttk.Label(adv_fr, text="每筆間隔：").grid(row=2, column=0, padx=4, pady=2, sticky="w")
-        self.dly_btw_lo = tk.DoubleVar(value=1.5)
-        self.dly_btw_hi = tk.DoubleVar(value=3.0)
         self._mk_float_entry(adv_fr, self.dly_btw_lo, width=6).grid(row=2, column=1, padx=2)
         ttk.Label(adv_fr, text="~").grid(row=2, column=2)
         self._mk_float_entry(adv_fr, self.dly_btw_hi, width=6).grid(row=2, column=3, padx=2)
         ttk.Label(adv_fr, text="（取完一筆到下一筆開始）", foreground="#666").grid(row=2, column=4, padx=8, sticky="w")
+        # 等待逾時 v1.0.57 移進來
+        ttk.Label(adv_fr, text="等待逾時：").grid(row=3, column=0, padx=4, pady=2, sticky="w")
+        self._mk_int_entry(adv_fr, self.dly_timeout, width=6).grid(row=3, column=1, padx=2)
+        ttk.Label(adv_fr, text="秒  （多人連線會慢，建議 30+）",
+                  foreground="#666").grid(row=3, column=2, columnspan=3, padx=8, sticky="w")
 
         def _toggle_adv():
             if self._adv_visible:
                 adv_fr.grid_forget()
-                self._adv_btn_text.set("▶ 進階區間設定（自訂秒數）")
+                self._adv_btn_text.set("▶ 進階設定（自訂秒數 / 逾時）")
                 self._adv_visible = False
             else:
-                adv_fr.grid(row=3, column=0, columnspan=5, padx=4, pady=(0, 4), sticky="ew")
-                self._adv_btn_text.set("▼ 進階區間設定（自訂秒數）")
+                adv_fr.grid(row=2, column=0, columnspan=5, padx=4, pady=(0, 4), sticky="ew")
+                self._adv_btn_text.set("▼ 進階設定（自訂秒數 / 逾時）")
                 self._adv_visible = True
 
         # 監聽 self.speed_preset 變化，更新 chip active 視覺（_apply_speed_preset 會被外部 set）
@@ -2086,36 +2084,41 @@ class App:
         ttk.Label(left, text=f"  輸出：{OUTPUT_DIR}", foreground="#666").pack(side="left", padx=8)
 
         # 右側：大按鈕（開始 / 暫停 / 停止）
+        # v1.0.57：改用 tk.Button 確保三顆視覺尺寸一致（ttk 在某些 Windows 主題下吃不到 padding/bg）
         right = ttk.Frame(btn_fr)
         right.pack(side="right")
         big_style = ttk.Style()
         try:
-            # v1.0.48：開始按鈕加強（Claude Design 設計概念稿）— 主題藍底白字、字級放大、padding 加倍
-            #          舊版本是 ttk default 灰底，視覺重量不夠
-            big_style.configure("BigStart.TButton",
-                                font=("微軟正黑體", 15, "bold"),
-                                padding=(28, 12),
-                                background="#2c6bd1", foreground="#ffffff",
-                                borderwidth=0, focuscolor="#2c6bd1")
-            big_style.map("BigStart.TButton",
-                          background=[("active", "#1f4f9c"), ("disabled", "#b0bec5")],
-                          foreground=[("disabled", "#ffffff")])
-            # 兼容舊樣式名（避免別處 Big.TButton 引用失效）
-            big_style.configure("Big.TButton", font=("微軟正黑體", 14, "bold"), padding=(20, 10))
-            big_style.configure("BigPause.TButton", font=("微軟正黑體", 14, "bold"), padding=(16, 10), foreground="#e65100")
-            big_style.configure("BigStop.TButton",  font=("微軟正黑體", 14, "bold"), padding=(16, 10), foreground="#b71c1c")
-            big_style.configure("Medium.TButton",   font=("微軟正黑體", 11, "bold"), padding=(14, 8))  # v1.0.44 輸出資料夾用
+            # 保留 Medium.TButton 給「輸出資料夾」用
+            big_style.configure("Medium.TButton", font=("微軟正黑體", 11, "bold"), padding=(14, 8))
         except Exception:
             pass
-        # v1.0.26：按鈕依當前分頁切換行為
-        self.start_btn = ttk.Button(right, text="▶ 開始取號", command=self._smart_start, style="BigStart.TButton")
-        self.start_btn.pack(side="left", padx=6, ipady=4)
-        self.pause_btn = ttk.Button(right, text="⏸ 暫停", command=self.toggle_pause,
-                                     state="disabled", style="BigPause.TButton")
-        self.pause_btn.pack(side="left", padx=6, ipady=4)
-        self.stop_btn = ttk.Button(right, text="■ 停止並關閉", command=self.stop,
-                                    state="disabled", style="BigStop.TButton")
-        self.stop_btn.pack(side="left", padx=6, ipady=4)
+        # 三顆同尺寸（width=10 字寬、padx/pady 一致）；只用色彩區分
+        _BIG_FONT = ("微軟正黑體", 14, "bold")
+        _BTN_W = 10
+        self.start_btn = tk.Button(right, text="▶ 開始取號", command=self._smart_start,
+                                    font=_BIG_FONT, width=_BTN_W,
+                                    bg="#2c6bd1", fg="#ffffff",
+                                    activebackground="#1f4f9c", activeforeground="#ffffff",
+                                    disabledforeground="#ffffff",
+                                    relief="flat", bd=0, padx=10, pady=10, cursor="hand2")
+        self.start_btn.pack(side="left", padx=6)
+        self.pause_btn = tk.Button(right, text="⏸ 暫停", command=self.toggle_pause,
+                                    state="disabled",
+                                    font=_BIG_FONT, width=_BTN_W,
+                                    bg="#fff3e0", fg="#e65100",
+                                    activebackground="#ffe0b2", activeforeground="#bf360c",
+                                    disabledforeground="#bdbdbd",
+                                    relief="flat", bd=0, padx=10, pady=10, cursor="hand2")
+        self.pause_btn.pack(side="left", padx=6)
+        self.stop_btn = tk.Button(right, text="■ 停止並關閉", command=self.stop,
+                                   state="disabled",
+                                   font=_BIG_FONT, width=_BTN_W,
+                                   bg="#fbe9e7", fg="#b71c1c",
+                                   activebackground="#ffcdd2", activeforeground="#7f0000",
+                                   disabledforeground="#bdbdbd",
+                                   relief="flat", bd=0, padx=10, pady=10, cursor="hand2")
+        self.stop_btn.pack(side="left", padx=6)
 
         # ─ 進度條（v1.0.19 加高 + % 在條內） ─
         prog_fr = ttk.Frame(self.root)
@@ -2158,6 +2161,9 @@ class App:
         log_btns.pack(fill="x", padx=4, pady=4)
         ttk.Button(log_btns, text="🧹 清除 Log",  command=self.clear_log).pack(side="left", padx=2)
         ttk.Button(log_btns, text="💾 儲存 Log",  command=self.save_log).pack(side="left", padx=2)
+        # v1.0.57：全展開（Toplevel 全螢幕看完整 log）+ 一鍵複製到剪貼簿
+        ttk.Button(log_btns, text="🔍 全展開",   command=self.show_log_full).pack(side="left", padx=2)
+        ttk.Button(log_btns, text="📋 複製全部", command=self.copy_log_clipboard).pack(side="left", padx=2)
         ttk.Label(log_btns, text="（儲存 Log 會將目前畫面內容存成 .txt，方便回報修正）",
                   foreground="#666").pack(side="left", padx=12)
 
@@ -2696,6 +2702,87 @@ class App:
             self.log(f"💾 已存 Log → {fp}")
         except Exception as e:
             self.log(f"⚠ Log 儲存失敗：{e}")
+
+    def copy_log_clipboard(self):
+        """v1.0.57：把當前 log box 全部內容複製到剪貼簿"""
+        try:
+            content = self.log_box.get("1.0", "end-1c")
+        except Exception:
+            content = ""
+        if not content.strip():
+            self.log("⚠ 目前 log 是空的，沒東西可複製")
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+            self.root.update()  # 確保剪貼簿真的寫入
+            self.log(f"📋 已複製 {len(content)} 字到剪貼簿")
+        except Exception as e:
+            self.log(f"⚠ 複製失敗：{e}")
+
+    def show_log_full(self):
+        """v1.0.57：開新 Toplevel 顯示完整 log（內含複製按鈕、可直接全選）"""
+        try:
+            content = self.log_box.get("1.0", "end-1c")
+        except Exception:
+            content = ""
+        t = THEMES.get(self.theme_var.get(), THEMES[DEFAULT_THEME])
+        win = tk.Toplevel(self.root)
+        win.title(f"執行紀錄 — 完整 Log（{len(content)} 字）")
+        win.geometry("1100x700")
+        win.configure(bg=t["bg"])
+        # top bar
+        bar = tk.Frame(win, bg=t["bg"])
+        bar.pack(fill="x", padx=12, pady=(10, 6))
+        tk.Label(bar, text="🔍 完整執行紀錄", font=("微軟正黑體", 14, "bold"),
+                 bg=t["bg"], fg=t["fg"]).pack(side="left")
+        def _do_copy():
+            try:
+                win.clipboard_clear()
+                win.clipboard_append(content)
+                win.update()
+                copy_btn.config(text="✓ 已複製")
+                win.after(1500, lambda: copy_btn.config(text="📋 複製全部"))
+            except Exception:
+                pass
+        copy_btn = tk.Button(bar, text="📋 複製全部", command=_do_copy,
+                              font=("微軟正黑體", 10, "bold"),
+                              bg=t["accent"], fg="#ffffff",
+                              activebackground=t["accent_hover"], activeforeground="#ffffff",
+                              relief="flat", bd=0, padx=14, pady=6, cursor="hand2")
+        copy_btn.pack(side="right", padx=(8, 0))
+        tk.Button(bar, text="關閉", command=win.destroy,
+                   font=("微軟正黑體", 10),
+                   bg=t["panel"], fg=t["fg"],
+                   relief="flat", bd=0, padx=14, pady=6, cursor="hand2").pack(side="right")
+        # log text area
+        body_fr = tk.Frame(win, bg=t["bg"])
+        body_fr.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        sb = tk.Scrollbar(body_fr, orient="vertical")
+        sb.pack(side="right", fill="y")
+        txt = tk.Text(body_fr, font=("Consolas", 11),
+                       bg=t["log_bg"], fg=t["log_fg"],
+                       insertbackground=t["log_fg"],
+                       wrap="word", yscrollcommand=sb.set,
+                       relief="flat", bd=0, padx=12, pady=10)
+        txt.pack(side="left", fill="both", expand=True)
+        sb.config(command=txt.yview)
+        # 著色
+        txt.tag_configure("success", foreground=t["log_success"])
+        txt.tag_configure("warn",    foreground=t["log_warn"])
+        txt.tag_configure("error",   foreground=t["log_error"], font=("Consolas", 11, "bold"))
+        # 逐行 insert + 著色（沿用 _classify_log 邏輯）
+        for line in content.split("\n"):
+            tag = self._classify_log(line) if line else None
+            if tag:
+                txt.insert("end", line + "\n", tag)
+            else:
+                txt.insert("end", line + "\n")
+        txt.see("end")
+        # 預設選取全部方便 Ctrl+C 也能用
+        txt.bind("<Control-a>", lambda e: (txt.tag_add("sel", "1.0", "end"), "break"))
+        win.transient(self.root)
+        win.lift()
 
     # ── 比例正規化驗證 ──
     def _validate_pcts(self, block, name):
@@ -3909,22 +3996,54 @@ def show_password_gate(parent):
 
     result = {"ok": False}
 
-    frm = tk.Frame(dlg, padx=24, pady=18, bg="#eef5fa")
+    # v1.0.57：登入框隆重化 — bg 用主題色、字級放大、輸入框大、留白寬鬆
+    BG = "#eef5fa"
+    ACCENT = "#1565c0"
+    ACCENT_DARK = "#0d47a1"
+
+    # 頂部 accent 色 banner（讓視覺有重量）
+    banner = tk.Frame(dlg, bg=ACCENT, height=6)
+    banner.pack(fill="x")
+
+    frm = tk.Frame(dlg, padx=44, pady=32, bg=BG)
     frm.pack(fill="both", expand=True)
 
-    tk.Label(frm, text="🔐 諮詢代碼取號小工具",
-             font=("Microsoft JhengHei", 13, "bold"),
-             bg="#eef5fa", fg="#1565c0").pack(anchor="w")
-    tk.Label(frm, text="請入授權密碼",
-             font=("Microsoft JhengHei", 9),
-             bg="#eef5fa", fg="#666").pack(anchor="w", pady=(2, 14))
-    tk.Label(frm, text="密碼：", bg="#eef5fa",
-             font=("Microsoft JhengHei", 10)).pack(anchor="w")
-    e1 = tk.Entry(frm, show="*", width=32, font=("Microsoft JhengHei", 11))
-    e1.pack(anchor="w", pady=(2, 4))
-    msg = tk.Label(frm, text="", fg="#c62828", bg="#eef5fa",
-                   font=("Microsoft JhengHei", 9), wraplength=320, justify="left")
-    msg.pack(anchor="w", pady=(4, 0))
+    # 大標題（icon 跟文字並排）
+    head_fr = tk.Frame(frm, bg=BG)
+    head_fr.pack(anchor="w")
+    tk.Label(head_fr, text="🔐",
+             font=("Segoe UI Emoji", 28),
+             bg=BG, fg=ACCENT).pack(side="left", padx=(0, 12))
+    title_fr = tk.Frame(head_fr, bg=BG)
+    title_fr.pack(side="left")
+    tk.Label(title_fr, text="諮詢代碼取號小工具",
+             font=("Microsoft JhengHei", 18, "bold"),
+             bg=BG, fg=ACCENT).pack(anchor="w")
+    tk.Label(title_fr, text="請輸入授權密碼以登入",
+             font=("Microsoft JhengHei", 10),
+             bg=BG, fg="#5a6577").pack(anchor="w", pady=(2, 0))
+
+    # 分隔線
+    tk.Frame(frm, bg="#cfd8dc", height=1).pack(fill="x", pady=(20, 18))
+
+    # 密碼輸入區（label + Entry 大、留白多）
+    tk.Label(frm, text="密碼", bg=BG, fg="#37474f",
+             font=("Microsoft JhengHei", 11, "bold")).pack(anchor="w")
+
+    # Entry 用一個內框包，模擬 border-radius 與較重的視覺
+    entry_wrap = tk.Frame(frm, bg="#ffffff", highlightthickness=2,
+                          highlightbackground="#cfd8dc",
+                          highlightcolor=ACCENT)
+    entry_wrap.pack(fill="x", pady=(8, 4))
+    e1 = tk.Entry(entry_wrap, show="●", font=("Microsoft JhengHei", 16),
+                  bg="#ffffff", fg="#1a2230",
+                  relief="flat", bd=0,
+                  insertbackground=ACCENT)
+    e1.pack(fill="x", padx=14, ipady=10)
+
+    msg = tk.Label(frm, text="", fg="#c62828", bg=BG,
+                   font=("Microsoft JhengHei", 10), wraplength=420, justify="left")
+    msg.pack(anchor="w", pady=(8, 0))
 
     busy = {"v": False}
     btn_login = None
@@ -3958,16 +4077,20 @@ def show_password_gate(parent):
             e1.delete(0, tk.END)
             e1.focus()
 
-    btnf = tk.Frame(frm, bg="#eef5fa")
-    btnf.pack(anchor="e", pady=(14, 0))
-    btn_login = tk.Button(btnf, text="登入", width=10, command=do_login,
-              bg="#1565c0", fg="white",
-              font=("Microsoft JhengHei", 10, "bold"),
-              relief="flat", padx=8, pady=4)
-    btn_login.pack(side="left", padx=4)
-    tk.Button(btnf, text="取消", width=8, command=dlg.destroy,
-              font=("Microsoft JhengHei", 10),
-              relief="flat", padx=8, pady=4).pack(side="left")
+    btnf = tk.Frame(frm, bg=BG)
+    btnf.pack(fill="x", pady=(28, 0))
+    # 取消（左）+ 登入（右），登入按鈕隆重大顆
+    tk.Button(btnf, text="取消", width=10, command=dlg.destroy,
+              font=("Microsoft JhengHei", 12),
+              bg="#ffffff", fg="#37474f",
+              activebackground="#eceff1", activeforeground="#37474f",
+              relief="flat", bd=0, padx=18, pady=10, cursor="hand2").pack(side="left")
+    btn_login = tk.Button(btnf, text="登 入", width=14, command=do_login,
+              bg=ACCENT, fg="white",
+              activebackground=ACCENT_DARK, activeforeground="white",
+              font=("Microsoft JhengHei", 13, "bold"),
+              relief="flat", bd=0, padx=22, pady=10, cursor="hand2")
+    btn_login.pack(side="right")
     e1.focus()
     dlg.bind("<Return>", lambda e: do_login())
 
