@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.0.48"
+VERSION = "1.0.49"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -1848,12 +1848,23 @@ class App:
 
         # ─ 比例設定區（2 欄並列） ─
         # 左欄：性別 / 國籍 / 教育
-        self.gender_pcts  = self._make_pct_block("性別分布", GENDERS, [100, 0, 0, 0],            parent=col_left)
-        self.nation_pcts  = self._make_pct_block("國籍分布", NATIONS, [100, 0],                  parent=col_left)
-        self.edu_pcts     = self._make_pct_block("教育程度分布", EDUS, [0, 33, 34, 33, 0],       parent=col_left)
+        # v1.0.49：每維度自己的色階（Claude Design exe_concept.html 3.3）
+        self.gender_pcts  = self._make_pct_block("性別分布", GENDERS, [100, 0, 0, 0],
+                                                  palette=["#5b8def", "#a4c0f0", "#dde5f4", "#eef1f5"],
+                                                  parent=col_left)
+        self.nation_pcts  = self._make_pct_block("國籍分布", NATIONS, [100, 0],
+                                                  palette=["#5fa787", "#9bc8b3"],
+                                                  parent=col_left)
+        self.edu_pcts     = self._make_pct_block("教育程度分布", EDUS, [0, 33, 34, 33, 0],
+                                                  palette=["#6c5ce7", "#a092ee", "#cbc4f4", "#e3dff8", "#eef1f5"],
+                                                  parent=col_left)
         # 右欄：性傾向 / 篩檢習慣 / 18 歲前居住地 / 現居住地
-        self.orient_pcts  = self._make_pct_block("性傾向分布", ORIENTS, [0, 0, 100],             parent=col_right)
-        self.testing_pcts = self._make_pct_block("篩檢習慣分布（Q1）", TESTING, [50, 50],         parent=col_right)
+        self.orient_pcts  = self._make_pct_block("性傾向分布", ORIENTS, [0, 0, 100],
+                                                  palette=["#d97a8a", "#e9a5b1", "#f3cbd2"],
+                                                  parent=col_right)
+        self.testing_pcts = self._make_pct_block("篩檢習慣分布（Q1）", TESTING, [50, 50],
+                                                  palette=["#c39145", "#dcb888"],
+                                                  parent=col_right)
         self.res18_rows   = self._make_city_block("18 歲以前居住地分布",                          parent=col_right)
         self.resCur_rows  = self._make_city_block("現居住地分布",                                  parent=col_right)
 
@@ -1961,20 +1972,84 @@ class App:
                   foreground="#9e9e9e",
                   font=("微軟正黑體", 9)).pack(side="right")
 
-    def _make_pct_block(self, title, options, defaults, parent=None):
-        fr = ttk.LabelFrame(parent or self.root, text=title + " （調一個，其他自動平衡到 100%）")
-        fr.pack(fill="x", padx=6, pady=4)
+    def _make_pct_block(self, title, options, defaults, parent=None, palette=None):
+        """v1.0.49 dashboard 卡片版（取代 v1.0.x LabelFrame）：
+        頂部 title + 「∑ N%」狀態 → 水平堆疊比例條 → legend 列（色點 + 標籤 + entry + 筆數）
+        參考 Claude Design 概念稿 exe_concept.html 3.3 人物輪廓卡。
+        palette 是該維度專屬色階（從主到淡），不夠長會重複用最後一格。"""
+        if not palette:
+            palette = ["#5b8def", "#a4c0f0", "#dde5f4", "#e3e8ef", "#eef1f5"]
+        # 不夠長補淡灰
+        while len(palette) < len(options):
+            palette = palette + ["#e3e8ef"]
+
+        # 卡容器
+        card = ttk.Frame(parent or self.root, padding=(12, 8))
+        card.pack(fill="x", padx=6, pady=4)
+
+        # Header：標題 + 總和狀態（滿 100% 時灰，否則橘色提示）
+        header = ttk.Frame(card)
+        header.pack(fill="x")
+        ttk.Label(header, text=title, font=("微軟正黑體", 11, "bold")).pack(side="left")
+        sum_var = tk.StringVar(value="")
+        sum_lbl = ttk.Label(header, textvariable=sum_var, font=("Consolas", 9))
+        sum_lbl.pack(side="right")
+
+        # 水平堆疊比例條
+        bar = tk.Canvas(card, height=8, bg="#eef1f5", highlightthickness=0, bd=0)
+        bar.pack(fill="x", pady=(6, 6))
+
+        # Legend 列
+        rows_fr = ttk.Frame(card)
+        rows_fr.pack(fill="x")
         vars_ = []
+        bar_segs = []
         for i, (op, dv) in enumerate(zip(options, defaults)):
-            ttk.Label(fr, text=op, width=14, anchor="w").grid(row=i, column=0, padx=4, pady=2, sticky="w")
+            c = palette[i]
+            row = ttk.Frame(rows_fr)
+            row.pack(fill="x", pady=1)
+            # 色點（用 ●，前景色 = palette）
+            ttk.Label(row, text="●", foreground=c, font=("微軟正黑體", 10)).pack(side="left", padx=(0, 4))
+            ttk.Label(row, text=op, width=12, anchor="w").pack(side="left")
             v = tk.IntVar(value=dv)
-            self._mk_int_entry(fr, v, width=6, justify="center").grid(row=i, column=1, padx=4)
-            ttk.Label(fr, text="%").grid(row=i, column=2)
+            self._mk_int_entry(row, v, width=5, justify="center").pack(side="left")
+            ttk.Label(row, text="%").pack(side="left", padx=(0, 8))
             cnt = tk.StringVar(value="0 筆")
-            ttk.Label(fr, textvariable=cnt, foreground="#1565c0", width=8).grid(row=i, column=3, padx=8)
+            ttk.Label(row, textvariable=cnt, foreground="#7d8696",
+                      font=("Consolas", 9), width=8, anchor="w").pack(side="left")
             vars_.append((op, v, cnt))
+            bar_segs.append((c, v))
+
+        # 重畫堆疊比例條 + 更新「∑」狀態
+        def redraw_bar(*_a):
+            try:
+                bar.delete("all")
+                w = bar.winfo_width()
+                if w <= 1:  # 還沒 layout 完
+                    return
+                x = 0
+                total_pct = sum(v.get() for _, v, _ in vars_)
+                for c, v in bar_segs:
+                    if total_pct <= 0:
+                        break
+                    seg_w = w * max(0, v.get()) / 100.0
+                    if seg_w > 0:
+                        bar.create_rectangle(x, 0, x + seg_w, 8, fill=c, outline="")
+                        x += seg_w
+                if total_pct == 100:
+                    sum_var.set("")
+                else:
+                    sum_var.set(f"⚠ ∑ {total_pct}%")
+            except Exception:
+                pass
+
+        bar.bind("<Configure>", redraw_bar)
         for (op, v, cnt) in vars_:
-            v.trace_add("write", lambda *a, _v=v, _block=vars_: self._balance_pct(_block, _v))
+            # rebalance + redraw
+            v.trace_add("write", lambda *a, _v=v, _block=vars_:
+                        (self._balance_pct(_block, _v), redraw_bar()))
+        # 初次呼叫一次（在 layout 完才有效，所以用 after）
+        card.after(50, redraw_bar)
         return vars_
 
     # ── v1.0.19/25 單筆取號分頁 ──
