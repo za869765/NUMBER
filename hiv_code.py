@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.2.5"
+VERSION = "1.2.6"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -364,7 +364,7 @@ def make_sample_xlsx(path):
     # v1.2.4 出生年欄提示：可只打末 2 碼
     try:
         _yi = [k for k, _, _, _ in COMPLETE_FIELDS].index("year")
-        desc_row[_yi] = "西元年，可只打末2碼（93→1993、01→2001）"
+        desc_row[_yi] = "打末2碼自動顯示西元（3→2003、93→1993）；打4碼亦可"
     except ValueError:
         pass
     default_row = [dv for _, _, dv, _ in COMPLETE_FIELDS]
@@ -415,11 +415,13 @@ def make_sample_xlsx(path):
     for col_idx, label in enumerate(headers, start=1):
         col_letter = ws.cell(1, col_idx).column_letter
         ws.column_dimensions[col_letter].width = max(16, min(28, len(str(label)) + 4))
-    # v1.2.5 出生年欄套「00」數字格式：打 3 顯示「03」（保留前導零視覺；匯入仍看數值）
+    # v1.2.6 出生年欄條件式格式：打 2 碼自動「顯示」成 4 碼西元（規則同匯入 _normalize_birth_year）
+    #   >=100（已打 4 碼）→ 照原樣；>cur2 → 19XX；<=cur2 → 20XX（出生不可能未來）
     try:
         _yi2 = [k for k, _, _, _ in COMPLETE_FIELDS].index("year")
         _ycol = ws.cell(1, _yi2 + 1).column_letter
-        ws.column_dimensions[_ycol].number_format = "00"
+        _cur2 = datetime.datetime.now().year % 100   # 2026 -> 26
+        ws.column_dimensions[_ycol].number_format = f'[>=100]0;[>{_cur2}]"19"00;"20"00'
     except Exception:
         pass
     ws.row_dimensions[1].height = 32
