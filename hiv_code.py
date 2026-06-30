@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -355,22 +355,22 @@ def make_sample_xlsx(path):
             return "/".join(allowed)
         return "（自由文字）"
     desc_row = [_opt_str(allowed, dv) for _, _, dv, allowed in COMPLETE_FIELDS]
+    # v1.2.3 性別欄提示改成可直接打代號
+    try:
+        _gi = [k for k, _, _, _ in COMPLETE_FIELDS].index("gender")
+        desc_row[_gi] = "1男 2女 3跨性別 4其他（可直接打代號）"
+    except ValueError:
+        pass
     default_row = [dv for _, _, dv, _ in COMPLETE_FIELDS]
-    sample = {
-        "gender": "女", "year": 1990, "res18": "台南市", "resCur": "台南市",
-        "orient": "異性", "edu": "高中職", "testing_habit": "否",
-    }
-    sample_row = [sample.get(k, dv) for k, _, dv, _ in COMPLETE_FIELDS]
 
     # Layout：
     #   Row 1 — 標題列（深藍底白字粗體）
     #   Row 2 — 選項提示（淺黃底）
     #   Row 3 — 預設值範本（灰底+斜體，匯入會自動忽略）
-    #   Row 4 — 實際資料起點（白色）
+    #   Row 4 起 — 使用者填實際資料（v1.2.3 移除範例資料列，給乾淨空白模板）
     ws.append(headers)
     ws.append(desc_row)
     ws.append(default_row)
-    ws.append(sample_row)
 
     # 樣式
     thin = Side(border_style="thin", color="546E7A")
@@ -392,11 +392,6 @@ def make_sample_xlsx(path):
     for c in ws[3]:
         c.font = Font(italic=True, color="78909C", size=9, name="微軟正黑體")
         c.fill = PatternFill("solid", fgColor="ECEFF1")
-        c.alignment = Alignment(horizontal="center", vertical="center")
-        c.border = border
-    # Row 4 範例資料（白底正常）
-    for c in ws[4]:
-        c.font = Font(color="263238", size=10, name="微軟正黑體")
         c.alignment = Alignment(horizontal="center", vertical="center")
         c.border = border
 
@@ -426,8 +421,10 @@ def make_sample_xlsx(path):
         if len(opts) > 250:
             continue
         col_letter = ws.cell(1, col_idx).column_letter
+        # v1.2.3 性別欄放寬：保留下拉但不擋輸入，讓使用者可直接打 1/2/3/4 代號（匯入時自動對應）
+        show_err = (key != "gender")
         dv_obj = DataValidation(type="list", formula1=f'"{opts}"', allow_blank=True,
-                                showErrorMessage=True,
+                                showErrorMessage=show_err,
                                 errorTitle="無效選項",
                                 error=f"請從下拉選擇：{opts[:60]}...")
         dv_obj.add(f"{col_letter}4:{col_letter}500")
