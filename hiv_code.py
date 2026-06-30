@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.2.4"
+VERSION = "1.2.5"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -415,6 +415,13 @@ def make_sample_xlsx(path):
     for col_idx, label in enumerate(headers, start=1):
         col_letter = ws.cell(1, col_idx).column_letter
         ws.column_dimensions[col_letter].width = max(16, min(28, len(str(label)) + 4))
+    # v1.2.5 出生年欄套「00」數字格式：打 3 顯示「03」（保留前導零視覺；匯入仍看數值）
+    try:
+        _yi2 = [k for k, _, _, _ in COMPLETE_FIELDS].index("year")
+        _ycol = ws.cell(1, _yi2 + 1).column_letter
+        ws.column_dimensions[_ycol].number_format = "00"
+    except Exception:
+        pass
     ws.row_dimensions[1].height = 32
     ws.row_dimensions[2].height = 28
     ws.row_dimensions[3].height = 18
