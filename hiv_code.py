@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -454,6 +454,19 @@ REQUIRED_KEYS_FOR_WARN = {
     "gender", "nation", "year", "res18", "resCur", "orient", "edu", "testing_habit",
 }
 
+# v1.2.2 性別欄容許用 1/2/3/4 代碼（或「1男」之類）對應回 男/女/跨性別/其他
+GENDER_CODE_MAP = {"1": "男", "2": "女", "3": "跨性別", "4": "其他"}
+def _normalize_gender(v):
+    s = str(v).strip()
+    if s in GENDERS:
+        return s
+    if s in GENDER_CODE_MAP:
+        return GENDER_CODE_MAP[s]
+    if s and s[0] in GENDER_CODE_MAP:   # 「1男」「2 女」之類前導代碼
+        rest = s[1:].strip()
+        return rest if rest in GENDERS else GENDER_CODE_MAP[s[0]]
+    return s
+
 def import_xlsx_profiles(path):
     """v1.0.31/33：讀取 xlsx
        回 (profiles, warnings_dict)
@@ -498,10 +511,12 @@ def import_xlsx_profiles(path):
             prof_raw[k] = val
         prof = {}
         row_blanks = []
+        blank_keys = []   # v1.2.2 記錄所有空欄 key（給「空格隨機補齊」用）
         for k, _, dv, allowed in COMPLETE_FIELDS:
             actual = prof_raw.get(k)
             is_blank = (actual is None or str(actual).strip() == "")
             if is_blank:
+                blank_keys.append(k)
                 # 只警示「應填但沒填」的（required 清單），其他靜默套用預設
                 if k in REQUIRED_KEYS_FOR_WARN:
                     label = OUTPUT_LABELS.get(k, k)
@@ -509,6 +524,8 @@ def import_xlsx_profiles(path):
                 prof[k] = dv
             elif allowed:
                 v = str(actual).strip()
+                if k == "gender":   # v1.2.2 容許 1/2/3/4 代碼或「1男」
+                    v = _normalize_gender(v)
                 if v not in allowed:
                     label = OUTPUT_LABELS.get(k, k)
                     invalids.append((ridx, label, v, dv))
@@ -517,6 +534,7 @@ def import_xlsx_profiles(path):
                     prof[k] = v
             else:
                 prof[k] = actual
+        prof["_blanks"] = blank_keys   # v1.2.2 內部標記（執行前 _build_pool_for_mode 會清掉）
         if row_blanks:
             blanks_by_row.append((ridx, row_blanks))
         try: prof["year"] = int(prof.get("year") or 1990)
@@ -1791,6 +1809,8 @@ class App:
         self._spinner_idx = 0
         self.mode_var = tk.StringVar(value="簡易（比例分布）")
         self._imported_profiles = []
+        # v1.2.2 完整模式：未填欄位依簡易模式比例隨機補齊（預設開）
+        self.fill_blank_random_var = tk.BooleanVar(value=True)
         self._current_pool = []
         self._completed_index = 0
         self._build()
@@ -1915,6 +1935,9 @@ class App:
         self.import_status_var = tk.StringVar(value="（未匯入）")
         ttk.Label(self._batch_xlsx_tools, textvariable=self.import_status_var,
                   foreground="#1565c0", font=("微軟正黑體", 9, "bold")).pack(side="left", padx=12)
+        # v1.2.2 空格依簡易比例隨機補齊（只填性別/出生年、其餘留空即可）
+        ttk.Checkbutton(self._batch_xlsx_tools, text="🎲 空格依簡易比例隨機補齊（風險題維持否）",
+                        variable=self.fill_blank_random_var).pack(side="left", padx=8)
         # 簡易為 default → 啟動時不 pack（_on_mode_change 切換時才顯示）
 
         # ── 批次取號分頁內容 ──
@@ -3116,8 +3139,11 @@ class App:
             # v1.0.33：發現 blank 或 invalid 時，跳出驗證 modal 讓使用者決定
             blanks = warn.get("blank", []) if isinstance(warn, dict) else []
             invalids = warn.get("invalid", []) if isinstance(warn, dict) else []
-            if blanks or invalids:
-                go = self._show_validation_modal(fp, profiles, blanks, invalids)
+            # v1.2.2：開「空格隨機補齊」時，空格是刻意留的 → 不為了空格跳警示 modal
+            will_random = self.fill_blank_random_var.get()
+            modal_blanks = [] if will_random else blanks
+            if modal_blanks or invalids:
+                go = self._show_validation_modal(fp, profiles, modal_blanks, invalids)
                 if not go:
                     self.log(f"📋 已取消匯入（使用者選擇回去修 {os.path.basename(fp)}）")
                     return
@@ -3125,10 +3151,14 @@ class App:
             self._imported_profiles = profiles
             self.import_status_var.set(f"✓ 已匯入 {len(profiles)} 筆")
             self.log(f"📥 已匯入 {len(profiles)} 筆 → {os.path.basename(fp)}")
-            for ridx, fields in blanks[:5]:
-                self.log(f"  ⚠ 列 {ridx} 未填：{', '.join(fields[:6])}{'...' if len(fields)>6 else ''}（已用預設值）")
-            if len(blanks) > 5:
-                self.log(f"  ⚠ 另有 {len(blanks)-5} 列有未填欄位")
+            if will_random and blanks:
+                self.log(f"  🎲 {len(blanks)} 列有空格 → 執行時依簡易比例隨機補齊"
+                         f"（你填的性別/出生年保留；風險題維持「否」）")
+            else:
+                for ridx, fields in blanks[:5]:
+                    self.log(f"  ⚠ 列 {ridx} 未填：{', '.join(fields[:6])}{'...' if len(fields)>6 else ''}（已用預設值）")
+                if len(blanks) > 5:
+                    self.log(f"  ⚠ 另有 {len(blanks)-5} 列有未填欄位")
             for ridx, label, bad, dv in invalids[:5]:
                 self.log(f"  ⚠ 列 {ridx} {label}=「{bad}」不合法，已改為「{dv}」")
             if self.mode_var.get() != "完整（匯入xlsx）":
@@ -3486,13 +3516,53 @@ class App:
             self.pb.configure_value(0, 100)
         except Exception: pass
 
+    # v1.2.2 完整模式「空格隨機補齊」會動到的 8 個基本欄位
+    _DEMO_FILL_KEYS = ("gender", "nation", "year", "res18", "resCur", "orient", "edu", "testing_habit")
+
+    def _random_demographics(self):
+        """v1.2.2：依簡易模式比例隨機產生 8 個基本欄位（給完整模式空格補齊用）"""
+        def expand(block):
+            opts, ws = [], []
+            for op, v, _ in block:
+                opts.append(op); ws.append(v.get())
+            return opts, ws
+        def expand_city(rows):
+            opts, ws = [], []
+            for cv, pv, _ in rows:
+                opts.append(cv.get()); ws.append(pv.get())
+            return opts, ws
+        ylo, yhi = sorted([self.year_lo.get(), self.year_hi.get()])
+        return {
+            "gender":  weighted_pick(*expand(self.gender_pcts)),
+            "nation":  weighted_pick(*expand(self.nation_pcts)),
+            "year":    random.randint(ylo, yhi),
+            "res18":   weighted_pick(*expand_city(self.res18_rows)),
+            "resCur":  weighted_pick(*expand_city(self.resCur_rows)),
+            "orient":  weighted_pick(*expand(self.orient_pcts)),
+            "edu":     weighted_pick(*expand(self.edu_pcts)),
+            "testing_habit": weighted_pick(*expand(self.testing_pcts)),
+        }
+
     def _build_pool_for_mode(self):
         """v1.0.21：依當前模式產 pool"""
         if self.mode_var.get() == "完整（匯入xlsx）":
             if not self._imported_profiles:
                 messagebox.showerror("無資料", "完整模式請先匯入 xlsx")
                 return None
-            return list(self._imported_profiles)
+            # v1.2.2：複製一份；若開「空格隨機補齊」，把每筆的空欄（限 8 基本欄位）
+            #         以簡易模式比例隨機填入（使用者已填的值保留；風險題維持預設「否」）
+            fill_random = self.fill_blank_random_var.get()
+            pool = []
+            for p in self._imported_profiles:
+                q = dict(p)
+                blanks = set(q.pop("_blanks", []))
+                if fill_random and blanks:
+                    rd = self._random_demographics()
+                    for kk in self._DEMO_FILL_KEYS:
+                        if kk in blanks:
+                            q[kk] = rd[kk]
+                pool.append(q)
+            return pool
         else:
             return self._build_profile_pool()
 
@@ -3657,6 +3727,7 @@ class App:
             "testing": [(op, v.get()) for op, v, _ in self.testing_pcts],
             "res18":   [(cv.get(), pv.get()) for cv, pv, _ in self.res18_rows],
             "resCur":  [(cv.get(), pv.get()) for cv, pv, _ in self.resCur_rows],
+            "fill_blank_random": self.fill_blank_random_var.get(),  # v1.2.2
         }
         return d
 
@@ -3703,6 +3774,7 @@ class App:
             if "total" in d:    self.total_var.set(d["total"])
             if "year_lo" in d:  self.year_lo.set(d["year_lo"])
             if "year_hi" in d:  self.year_hi.set(d["year_hi"])
+            if "fill_blank_random" in d:  self.fill_blank_random_var.set(bool(d["fill_blank_random"]))  # v1.2.2
             if "speed_preset" in d: self.speed_preset.set(d["speed_preset"])
             for k_ui, k_dict in [
                 ("dly_act_lo","dly_act_lo"), ("dly_act_hi","dly_act_hi"),
