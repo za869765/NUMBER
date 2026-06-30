@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.2.3"
+VERSION = "1.2.4"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -361,6 +361,12 @@ def make_sample_xlsx(path):
         desc_row[_gi] = "1男 2女 3跨性別 4其他（可直接打代號）"
     except ValueError:
         pass
+    # v1.2.4 出生年欄提示：可只打末 2 碼
+    try:
+        _yi = [k for k, _, _, _ in COMPLETE_FIELDS].index("year")
+        desc_row[_yi] = "西元年，可只打末2碼（93→1993、01→2001）"
+    except ValueError:
+        pass
     default_row = [dv for _, _, dv, _ in COMPLETE_FIELDS]
 
     # Layout：
@@ -464,6 +470,28 @@ def _normalize_gender(v):
         return rest if rest in GENDERS else GENDER_CODE_MAP[s[0]]
     return s
 
+# v1.2.4 出生年：容許只打末 2 碼自動補西元。
+#   1~2 碼 → 先當 20XX；出生不可能在未來，超過今年就退回 19XX（93→1993、01→2001、26→2026）
+#   4 碼（含以上）→ 照原值；回 None 表示空
+def _normalize_birth_year(v):
+    if v is None or str(v).strip() == "":
+        return None
+    try:
+        n = int(float(v))               # 容許 1993 / "1993" / 1993.0 / "93"
+        s = str(abs(n))
+    except (ValueError, TypeError):
+        s = "".join(ch for ch in str(v) if ch.isdigit())
+        if not s:
+            return None
+        n = int(s)
+    if len(s) <= 2:
+        cur = datetime.datetime.now().year
+        cand = 2000 + n
+        if cand > cur:                  # 落在未來 → 退回 19XX
+            cand = 1900 + n
+        return cand
+    return n                            # 3 碼以上照原值（4 碼正常西元年）
+
 def import_xlsx_profiles(path):
     """v1.0.31/33：讀取 xlsx
        回 (profiles, warnings_dict)
@@ -534,8 +562,8 @@ def import_xlsx_profiles(path):
         prof["_blanks"] = blank_keys   # v1.2.2 內部標記（執行前 _build_pool_for_mode 會清掉）
         if row_blanks:
             blanks_by_row.append((ridx, row_blanks))
-        try: prof["year"] = int(prof.get("year") or 1990)
-        except Exception: prof["year"] = 1990
+        _y = _normalize_birth_year(prof.get("year"))   # v1.2.4 末2碼→西元
+        prof["year"] = _y if _y is not None else 1990
         profiles.append(prof)
     return profiles, {"blank": blanks_by_row, "invalid": invalids}
 
