@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.2.6"
+VERSION = "1.3.0"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -2982,9 +2982,12 @@ class App:
                 today_sheet = datetime.datetime.now().strftime("%Y-%m-%d")
                 self._existing_rows = []
                 self._current_xlsx_path = xlsx_full
-                if os.path.isfile(xlsx_full):
+                # v1.3.0：上輪主檔被鎖時資料在影子檔 _LIVE → 啟動先收養，避免遺失
+                load_src = self._adopt_live_if_any(xlsx_full)
+                self._xlsx_load_src = load_src
+                if os.path.isfile(load_src):
                     try:
-                        wb_old = load_workbook(xlsx_full)
+                        wb_old = load_workbook(load_src)
                         if today_sheet in wb_old.sheetnames:
                             ws_old = wb_old[today_sheet]
                             old_all = list(ws_old.iter_rows(values_only=True))
@@ -2993,19 +2996,23 @@ class App:
                                 old_rows = [r for r in old_all[1:]
                                              if any(c not in (None, "") for c in r)]
                                 self._existing_rows = _normalize_existing(old_rows, old_headers)
-                            self.log(f"📁 諮詢代碼.xlsx 已有今天分頁（{len(self._existing_rows)} 筆），將合併寫入")
+                            self.log(f"📁 {os.path.basename(load_src)} 已有今天分頁（{len(self._existing_rows)} 筆），將合併寫入")
                         else:
-                            self.log(f"📁 諮詢代碼.xlsx 已存在但今天 ({today_sheet}) 還沒分頁，將新增")
+                            self.log(f"📁 {os.path.basename(load_src)} 已存在但今天 ({today_sheet}) 還沒分頁，將新增")
                     except Exception as e:
-                        self.log(f"⚠ 讀取諮詢代碼.xlsx 失敗，改開新檔：{e}")
+                        self.log(f"⚠ 讀取{os.path.basename(load_src)} 失敗，改開新檔：{e}")
                         self._existing_rows = []
                 else:
                     archive_old_outputs(self.log)
                     self.log("📁 諮詢代碼.xlsx 不存在，將建立新檔")
             # v1.0.53：固定檔多日多分頁；今天分頁永遠排在第一頁
             today_sheet = datetime.datetime.now().strftime("%Y-%m-%d")
-            if os.path.isfile(self._current_xlsx_path):
-                wb = load_workbook(self._current_xlsx_path)
+            # v1.3.0：主檔被鎖時基底改讀影子檔（LIVE 才有其他日期 sheet 的最新完整內容）
+            load_src = getattr(self, "_xlsx_load_src", None) or self._current_xlsx_path
+            if not os.path.isfile(load_src):
+                load_src = self._current_xlsx_path
+            if os.path.isfile(load_src):
+                wb = load_workbook(load_src)
                 if today_sheet in wb.sheetnames:
                     del wb[today_sheet]
                 ws = wb.create_sheet(today_sheet, 0)  # index 0 = 第一頁
@@ -3084,6 +3091,7 @@ class App:
             wb.save(tmp_path)
         except Exception as e:
             self.log(f"⚠ 寫暫存檔失敗：{e}")
+            self._last_saved_path = None
             return False
 
         # 嘗試原子換掉主檔
@@ -3093,8 +3101,16 @@ class App:
             # 主檔被開啟，改寫 _LIVE 影子檔
             stem, ext = os.path.splitext(target_path)
             live_path = f"{stem}_LIVE{ext}"
+            # v1.3.0：既有 _LIVE 是未收養的衝突檔 → 不可覆寫，改寫 RECOVERY 檔
+            # 檔名帶本階段時間戳，避免覆寫前一輪尚未人工核對的 RECOVERY
+            if getattr(self, "_live_do_not_delete", False):
+                if not getattr(self, "_recovery_suffix", None):
+                    self._recovery_suffix = (datetime.datetime.now().strftime(
+                        "%Y%m%d_%H%M%S") + f"_{os.getpid()}")
+                live_path = f"{stem}_LIVE_RECOVERY_{self._recovery_suffix}{ext}"
             try:
                 os.replace(tmp_path, live_path)
+                self._last_saved_path = live_path
                 if not getattr(self, "_warned_locked", False):
                     self.log(
                         f"⚠ 主檔被開啟中，已寫入影子檔 "
@@ -3105,16 +3121,21 @@ class App:
             except Exception as e:
                 self.log(f"⚠ 連影子檔都寫不進去：{e}")
                 # 最後保險：留住 .tmp 不刪
+                self._last_saved_path = None
                 return False
             return False
         except Exception as e:
             self.log(f"⚠ 換檔失敗（將下次重試）：{e}")
+            self._last_saved_path = None
             return False
 
-        # 主檔成功 → 清掉之前的影子檔（若存在）
+        # 主檔成功 → 之後基底直接讀主檔
+        self._last_saved_path = target_path
+        self._xlsx_load_src = target_path
+        # 主檔成功 → 清掉之前的影子檔（若存在；衝突未收養的 LIVE 除外）
         stem, ext = os.path.splitext(target_path)
         live_path = f"{stem}_LIVE{ext}"
-        if os.path.isfile(live_path):
+        if os.path.isfile(live_path) and not getattr(self, "_live_do_not_delete", False):
             try:
                 os.remove(live_path)
                 self.log("✓ 主檔已可寫入，影子檔自動移除")
@@ -3123,6 +3144,136 @@ class App:
         if getattr(self, "_warned_locked", False):
             self._warned_locked = False
         return True
+
+    # ── v1.3.0 影子檔收養（啟動時）＋收尾警示 ────────────────
+    def _shadow_path(self):
+        if not self._current_xlsx_path:
+            return None
+        stem, ext = os.path.splitext(self._current_xlsx_path)
+        return f"{stem}_LIVE{ext}"
+
+    @staticmethod
+    def _sheets_subset_of(path_a, path_b):
+        """A 的每個 sheet 都存在於 B，且 A 各 sheet 的代碼欄(B欄)值 ⊆ B 的 → True。
+        用來確認主檔內容完全被影子檔涵蓋，才能安全收養。"""
+        from openpyxl import load_workbook
+        wa = load_workbook(path_a, read_only=True)
+        wb_ = load_workbook(path_b, read_only=True)
+        try:
+            def codes(ws):
+                out = set()
+                for row in ws.iter_rows(min_col=2, max_col=2, min_row=2,
+                                        values_only=True):
+                    v = row[0]
+                    if v not in (None, ""):
+                        out.add(str(v))
+                return out
+            for name in wa.sheetnames:
+                if name not in wb_.sheetnames:
+                    return False
+                if not codes(wa[name]) <= codes(wb_[name]):
+                    return False
+            return True
+        finally:
+            wa.close(); wb_.close()
+
+    def _adopt_live_if_any(self, xlsx_full):
+        """啟動時若存在影子檔 _LIVE（上輪主檔被鎖時的完整快照）：
+        主檔 ⊆ LIVE → 備份主檔到 old/ 後把 LIVE 原子換入主檔；
+        主檔仍被鎖 → 本輪改以 LIVE 為讀取來源（存檔照舊 fallback）；
+        內容衝突（主檔有 LIVE 沒有的代碼）→ 兩檔都保留並警告。
+        回傳本輪實際讀取既有資料的路徑。"""
+        import shutil, glob
+        stem, ext = os.path.splitext(xlsx_full)
+        live_path = f"{stem}_LIVE{ext}"
+        # 殘留的衝突備份/RECOVERY 檔不會自動合併，提醒使用者手動核對
+        for stray in glob.glob(f"{stem}_LIVE_*{ext}"):
+            self.log(f"⚠ 發現殘留影子檔（不會自動合併，請手動核對）："
+                     f"{os.path.basename(stray)}")
+        if not os.path.isfile(live_path):
+            return xlsx_full
+        if not os.path.isfile(xlsx_full):
+            try:
+                os.replace(live_path, xlsx_full)
+                self.log("📁 主檔不存在 → 影子檔 _LIVE 已升格為主檔")
+                return xlsx_full
+            except Exception as e:
+                self.log(f"⚠ 影子檔升格失敗（{e}），本輪直接讀取 _LIVE")
+                return live_path
+        try:
+            subset = self._sheets_subset_of(xlsx_full, live_path)
+        except Exception as e:
+            self.log(f"⚠ 影子檔比對失敗（{e}），保留兩檔，本輪以 _LIVE 為資料來源")
+            return live_path
+        if not subset:
+            keep = (f"{stem}_LIVE_衝突備份_"
+                    f"{datetime.datetime.now():%Y%m%d_%H%M%S}{ext}")
+            try:
+                os.replace(live_path, keep)
+                self.log("⚠ 主檔含影子檔沒有的資料（可能手動改過），不自動合併；")
+                self.log(f"   影子檔已改名保留，請手動核對：{os.path.basename(keep)}")
+            except Exception as e:
+                self.log(f"⚠ 衝突影子檔改名失敗：{e}")
+                # 未收養的 LIVE 含主檔沒有的資料 → 禁止本輪存檔成功後自動刪它
+                self._live_do_not_delete = True
+            return xlsx_full
+        try:
+            old_dir = os.path.join(OUTPUT_DIR, "old")
+            os.makedirs(old_dir, exist_ok=True)
+            backup = os.path.join(
+                old_dir,
+                f"諮詢代碼_主檔備份_{datetime.datetime.now():%Y%m%d_%H%M%S}{ext}")
+            shutil.copy2(xlsx_full, backup)
+            os.replace(live_path, xlsx_full)
+            self.log("📁 偵測到上輪影子檔 _LIVE（主檔當時被開啟）→ 已自動併回主檔")
+            self.log(f"   舊主檔備份於 old\\{os.path.basename(backup)}")
+            return xlsx_full
+        except PermissionError:
+            self.log("⚠ 主檔仍被 Excel 開啟中，本輪以影子檔 _LIVE 為資料來源；"
+                     "關閉主檔後會自動回寫")
+            return live_path
+        except Exception as e:
+            self.log(f"⚠ 影子檔併回失敗（{e}），本輪以 _LIVE 為資料來源")
+            return live_path
+
+    def _notify_shadow_pending(self):
+        """收尾時資料仍只在影子檔（或連影子檔都沒寫成）→ 跳窗要求處理，
+        不再無聲自動關閉。必須在主執行緒呼叫（root.after 排入）。"""
+        n = len(self.results)
+        live = self._shadow_path()
+        while True:
+            saved = getattr(self, "_last_saved_path", None)
+            if saved is None:
+                msg = (f"本輪 {n} 筆連影子檔都寫不進去！\n"
+                       f"資料暫存在：\n{self._current_xlsx_path}.writing.tmp\n"
+                       f"（其實是完整 xlsx，可改副檔名後用 Excel 開啟）\n\n"
+                       f"請關閉所有相關 Excel 視窗後按「重試」回寫主檔。")
+            else:
+                msg = (f"主檔「諮詢代碼.xlsx」整場被 Excel 開啟中，\n"
+                       f"本輪 {n} 筆已完整存到影子檔 {os.path.basename(saved)}。\n\n"
+                       f"請關閉主檔的 Excel 視窗後按「重試」回寫主檔；\n"
+                       f"按「取消」則保留影子檔（下次啟動會自動併回）。")
+            retry = messagebox.askretrycancel("資料尚未寫回主檔", msg)
+            if not retry:
+                self.log("⚠ 已略過回寫；影子檔保留，下次啟動會自動併回主檔")
+                try:
+                    open_path = saved if (saved and os.path.isfile(saved)) else live
+                    if open_path and os.path.isfile(open_path):
+                        os.startfile(open_path)
+                except Exception:
+                    pass
+                return  # 不自動關閉程式，讓使用者看得到警示
+            self._save_excel()
+            if getattr(self, "_last_saved_path", None) == self._current_xlsx_path:
+                self.log("✓ 已回寫主檔，影子檔清除完成")
+                if self.auto_open_xlsx.get():
+                    try:
+                        os.startfile(self._current_xlsx_path)
+                    except Exception as e:
+                        self.log(f"⚠ 自動開啟失敗：{e}")
+                    self.log("✓ 任務結束（已開 Excel），程式 3 秒後關閉…")
+                    self.root.after(3000, self._force_exit)
+                return
 
     # ── 啟動 ──
     # ── v1.0.21 模式切換 + xlsx 匯入匯出 ──
@@ -3930,9 +4081,14 @@ class App:
         finally:
             worker.quit()
             self._save_excel()
+            # v1.3.0：收尾時資料仍只在影子檔（主檔整場被鎖）或連影子檔都沒寫成
+            # 判準：最後一次存檔沒有真的落在主檔
+            shadow_pending = bool(self.results) and (
+                getattr(self, "_last_saved_path", None) != self._current_xlsx_path)
             # v1.0.14 全部跑完（非中途停止）且勾選自動開啟 Excel
             done_naturally = not self.stop_evt.is_set()
-            if done_naturally and self.auto_open_xlsx.get() and self._current_xlsx_path \
+            if done_naturally and not shadow_pending \
+                    and self.auto_open_xlsx.get() and self._current_xlsx_path \
                     and os.path.exists(self._current_xlsx_path):
                 self.log("✓ 全部完成，自動開啟 Excel…")
                 try: os.startfile(self._current_xlsx_path)
@@ -3959,11 +4115,18 @@ class App:
                     self.log(f"⚠ 續傳檔寫入失敗：{e}")
                 try: self._save_settings()
                 except Exception: pass
-                self.root.after(800, self._force_exit)
+                # v1.3.0：資料未回到主檔 → 中途停止也要跳警示，不無聲關閉
+                if shadow_pending:
+                    self.root.after(0, self._notify_shadow_pending)
+                else:
+                    self.root.after(800, self._force_exit)
             else:
                 self._finish()
+                # v1.3.0：資料未回到主檔 → 跳警示窗（主執行緒），不自動關閉
+                if done_naturally and shadow_pending:
+                    self.root.after(0, self._notify_shadow_pending)
                 # v1.0.14 自然完成 + 勾選 → 同樣自動關閉程式（如使用者勾「完成後自動停止」）
-                if done_naturally and self.auto_open_xlsx.get():
+                elif done_naturally and self.auto_open_xlsx.get():
                     self.log("✓ 任務結束（已開 Excel），程式 3 秒後關閉…")
                     self.root.after(3000, self._force_exit)
 
@@ -3974,10 +4137,16 @@ class App:
             return
         try:
             self._incremental_save_excel()
-            if self._current_xlsx_path and os.path.exists(self._current_xlsx_path):
-                self.log(f"💾 已存 Excel → {self._current_xlsx_path}（共 {len(self.results)} 筆）")
+            # v1.3.0：回報「實際」寫入的檔案，不再一律顯示主檔路徑
+            saved = getattr(self, "_last_saved_path", None)
+            if saved == self._current_xlsx_path:
+                self.log(f"💾 已存 Excel → {saved}（共 {len(self.results)} 筆）")
+            elif saved:
+                self.log(f"💾 主檔被開啟中 → 已存影子檔 {os.path.basename(saved)}"
+                         f"（共 {len(self.results)} 筆，資料完整）")
             else:
-                self.log("⚠ Excel 路徑異常，請手動檢查 number 資料夾")
+                self.log(f"⚠ 主檔與影子檔都無法寫入！資料暫存在 "
+                         f"{os.path.basename(self._current_xlsx_path or '')}.writing.tmp")
         except Exception as e:
             self.log(f"⚠ 最終儲存失敗：{e}")
 
