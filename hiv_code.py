@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.3.3"
+VERSION = "1.3.4"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -2555,7 +2555,8 @@ class App:
         # v1.2.2 空格依簡易比例隨機補齊（只填性別/出生年、其餘留空即可）
         ttk.Checkbutton(self._batch_xlsx_tools, text="🧩 空格依下方設定補齊（風險題維持否）",
                         variable=self.fill_blank_random_var,
-                        command=lambda: self._apply_card_visibility()).pack(side="left", padx=8)
+                        command=lambda: (self._render_blank_summary(), self._apply_card_visibility(),
+                                         self._update_counts())).pack(side="left", padx=8)
         # 簡易為 default → 啟動時不 pack（_on_mode_change 切換時才顯示）
 
         # ── 批次取號分頁內容 ──
@@ -3977,6 +3978,10 @@ class App:
         self._blank_ym_var = tk.StringVar(value="")
         self._blank_ym_lbl = ttk.Label(panel, textvariable=self._blank_ym_var,
                                        font=("微軟正黑體", 10), foreground="#c39145")
+        # v1.3.4 總開關未勾時的紅字提醒
+        self._blank_off_lbl = ttk.Label(
+            panel, text="⚠ 上方「🧩 空格依下方設定補齊」未勾選 → 空格全部用預設值（風險題維持「否」），卡片不會顯示；勾選後即可設定比例",
+            foreground="#b71c1c", font=("微軟正黑體", 10, "bold"))
         # v1.3.3 風險題開關列（缺風險題時才顯示）
         self.risk_mode_var = tk.StringVar(value="no")
         self._blank_risk_fr = ttk.Frame(panel)
@@ -3985,9 +3990,16 @@ class App:
                   font=("微軟正黑體", 10, "bold"), foreground="#b71c1c").pack(side="left")
         ttk.Radiobutton(self._blank_risk_fr, text="維持「否」（預設）", variable=self.risk_mode_var, value="no",
                         command=lambda: (self._apply_card_visibility(), self._update_counts())).pack(side="left", padx=(8, 4))
+        def _pick_risk_custom():
+            # v1.3.4：選了風險題補齊就自動勾上總開關（使用者反映不知道要自己點）
+            if not self.fill_blank_random_var.get():
+                self.fill_blank_random_var.set(True)
+                self.log("  ☑ 已自動勾選「空格依下方設定補齊」")
+            self._render_blank_summary(); self._apply_card_visibility(); self._update_counts()
         ttk.Radiobutton(self._blank_risk_fr, text="依下方風險題卡片補齊", variable=self.risk_mode_var, value="custom",
-                        command=lambda: (self._apply_card_visibility(), self._update_counts())).pack(side="left", padx=4)
-        ttk.Label(self._blank_risk_fr, text="（主題的「是」比例 > 0 時，其衍生子題卡片會連帶出現）",
+                        command=_pick_risk_custom).pack(side="left", padx=4)
+        ttk.Label(self._blank_risk_fr,
+                  text="（維持否＝留空的風險題全填「否」；依卡片補齊＝下方會出現每題的比例卡片，例如 Q1 過性行為 30% 是，主題「是」>0 時衍生子題卡片連帶出現）",
                   foreground="#7d8696", font=("微軟正黑體", 9)).pack(side="left", padx=6)
         # 風險題卡片區（三欄），放在 midbar 之後，由 _on_mode_change 決定 pack
         self._risk_bar = ttk.LabelFrame(parent, text="⚠ 風險題補齊（只顯示有缺格的題目；子題只在上層「是」> 0 時出現）")
@@ -4067,6 +4079,7 @@ class App:
             ttk.Label(fr, text="（匯入 xlsx 後，這裡會列出每個欄位缺幾格，並只顯示缺格欄位的比例設定）",
                       foreground="#7d8696", font=("微軟正黑體", 10)).pack(side="left")
             self._blank_year_fr.pack_forget(); self._blank_ym_lbl.pack_forget()
+            self._blank_off_lbl.pack_forget(); self._blank_risk_fr.pack_forget()
             return
         ttk.Label(fr, text="缺格統計：", font=("微軟正黑體", 10, "bold")).pack(side="left")
         for k in DEMO_FILL_KEYS:
@@ -4084,7 +4097,7 @@ class App:
         if total_blank == 0 and ym_n == 0:
             ttk.Label(fr, text="　✓ 全部填齊，不需補齊", foreground="#2e7d32",
                       font=("微軟正黑體", 10, "bold")).pack(side="left", padx=8)
-        if bc.get("year", 0):
+        if bc.get("year", 0) and self.fill_blank_random_var.get():
             self._blank_year_fr.pack(fill="x", padx=8, pady=2)
         else:
             self._blank_year_fr.pack_forget()
@@ -4094,10 +4107,16 @@ class App:
         else:
             self._blank_ym_lbl.pack_forget()
         # v1.3.3 風險題缺格（只算主題）
+        # v1.3.4 總開關未勾 → 紅字提醒，風險題選項列不顯示（避免選了卻沒東西出現）
+        fill_on = self.fill_blank_random_var.get()
+        if not fill_on:
+            self._blank_off_lbl.pack(fill="x", padx=8, pady=(2, 6))
+        else:
+            self._blank_off_lbl.pack_forget()
         # 主題留空，或子題留空且上層已明確填「是」（__direct），都算「有風險題可補」
         risk_n = sum(1 for k in RISK_KEYS
                      if bc.get(k, 0) > 0 and (RISK_PARENT.get(k) is None or bc.get(k + "__direct", 0) > 0))
-        if risk_n:
+        if risk_n and fill_on:
             self._blank_risk_lbl_var.set(f"● 風險題 Q1～Q13 有 {risk_n} 題留空 →")
             self._blank_risk_fr.pack(fill="x", padx=8, pady=(2, 6))
         else:
