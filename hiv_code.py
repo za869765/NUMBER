@@ -1634,8 +1634,10 @@ class HivaWorker:
                 if tag in ("input", "select"):
                     raw.append(el)
                     continue
-                raw.extend(el.find_elements(By.XPATH, ".//input | .//select"))
-                if "lightLine" in (el.get_attribute("class") or ""):
+                inner = el.find_elements(By.XPATH, ".//input | .//select")
+                raw.extend(inner)
+                # lightLine 標在「題目列」時 radio 在下一列；若本列已有控件就不往下抓（避免抓到下一題）
+                if not inner and "lightLine" in (el.get_attribute("class") or ""):
                     raw.extend(el.find_elements(By.XPATH,
                         "following-sibling::tr[1]//input | following-sibling::tr[1]//select"))
             for el in raw:
@@ -1670,12 +1672,9 @@ class HivaWorker:
                 val = self._profile_value_for(key) if key else None
                 rv = self._option_value(key, val) if key else None
                 if rv is None:
-                    rv = "2"   # 不認識的題目：預設「否」
-                    try:
-                        if not d.find_elements(By.XPATH, f"//input[@type='radio' and @name=\"{name}\" and @value='2']"):
-                            rv = d.find_element(By.XPATH, f"//input[@type='radio' and @name=\"{name}\"]").get_attribute("value")
-                    except Exception:
-                        pass
+                    # 對照不到的題目不猜值（猜「否」會讓網站答案≠Excel 紀錄），記 log 交給 recovery_fn
+                    self.log(f"  ⚠ 反紅題目 {group} 沒有對照，略過")
+                    continue
                 label = OUTPUT_LABELS.get(key, group)
                 if group == "rdlRegularScreening":
                     ok = self._set_p7_habit(rv, retries=0)
@@ -1726,7 +1725,15 @@ class HivaWorker:
             time.sleep(0.4)
             if self._red_modal_present():
                 self.log(f"⚠ 換頁被擋：有題目反紅（第 {attempt+1} 次），即時補填…")
-                self._fix_red_fields()
+                if self._fix_red_fields() > 0:
+                    continue          # 有補到東西 → 直接重按
+                # 沒補到任何欄位 → 走原本的失敗流程（關彈窗 + recovery_fn 重填本頁）
+                if recovery_fn:
+                    try:
+                        self.log("  ↻ 反紅找不到可補欄位，改重新填寫本頁…")
+                        recovery_fn()
+                    except Exception as e:
+                        self.log(f"  ↻ recovery_fn 失敗：{e}")
                 continue
             ok = True
             if expect_progress is not None:
@@ -1794,7 +1801,7 @@ class HivaWorker:
             # v1.3.2 反紅即時改正：完成被擋（客戶端 checkForm 立即彈、伺服器端必填則整頁重載後彈）
             #         → 最多等 8 秒看「到結果頁」或「反紅彈窗」哪個先來；都沒來交給後面的結果頁等待
             blocked = False
-            deadline = time.time() + 8
+            deadline = time.time() + max(8, self.dly.wait_timeout)   # 多人連線慢時伺服器反紅可能 >8 秒
             while time.time() < deadline:
                 try:
                     if "HAANeedScreeningMessage" in (d.current_url or "") or \
@@ -2073,16 +2080,21 @@ class HivaWorker:
         try: el.click()
         except Exception: pass
         for _ in range(2):
+            # 只有「明確查到沒勾上」才補 JS click；查詢拋例外（UpdatePanel 正在換 DOM）只重查，
+            # 避免對已勾選的新元素再點一次而觸發第二次 postback
+            selected = None
             try:
-                if d.find_element(By.XPATH, xp).is_selected():
-                    return True
+                selected = d.find_element(By.XPATH, xp).is_selected()
             except Exception:
-                pass
+                selected = None
+            if selected:
+                return True
             time.sleep(0.15)
-            try:
-                d.execute_script("arguments[0].click();", d.find_element(By.XPATH, xp))
-            except Exception:
-                pass
+            if selected is False:
+                try:
+                    d.execute_script("arguments[0].click();", d.find_element(By.XPATH, xp))
+                except Exception:
+                    pass
         try:
             return d.find_element(By.XPATH, xp).is_selected()
         except Exception:
@@ -2362,6 +2374,7 @@ class App:
         _bc.bind("<Enter>", lambda e, c=_bc: c.bind_all("<MouseWheel>", _batch_wheel))
         _bc.bind("<Leave>", lambda e, c=_bc: c.unbind_all("<MouseWheel>"))
         self._batch_canvas = _bc
+        self._batch_wheel = _batch_wheel   # 給分頁內 Combobox 綁定：滾輪只捲頁、不換選項
         tab_single = ttk.Frame(self.notebook)
         self.notebook.add(tab_batch_outer, text="📊 批次取號")
         self.notebook.add(tab_single, text="🎯 單筆取號")
@@ -2621,7 +2634,8 @@ class App:
 
         log_fr = ttk.LabelFrame(self.root, text="執行紀錄（綠=成功 / 黃=注意 / 紅=錯誤）")
         log_fr.pack(fill="both", expand=True, padx=6, pady=6)
-        self.log_box = tk.Text(log_fr, height=6,   # v1.3.2 15→6 行：底部固定後讓分頁區保留空間（全展開可看完整） font=("Consolas", 10), bg="#1e1e1e", fg="#dcdcdc",
+        # v1.3.2 15→6 行：底部固定後讓分頁區保留空間（全展開可看完整）
+        self.log_box = tk.Text(log_fr, height=6, font=("Consolas", 10), bg="#1e1e1e", fg="#dcdcdc",
                                insertbackground="#dcdcdc")
         self.log_box.pack(fill="both", expand=True, padx=4, pady=(4, 0))
         # log 著色 tag
@@ -3010,6 +3024,8 @@ class App:
             c = palette[idx % len(palette)]
             ttk.Label(row_fr, text="●", foreground=c, font=("微軟正黑體", 10)).pack(side="left", padx=(0, 4))
             cb = ttk.Combobox(row_fr, textvariable=cv, values=CITIES, width=12, state="readonly")
+            # v1.3.2：readonly Combobox 的滾輪預設會換選項；批次分頁可捲動後改成只捲頁（break 擋掉 class binding）
+            cb.bind("<MouseWheel>", lambda e: (getattr(self, "_batch_wheel", lambda _e: None)(e), "break")[1])
             cb.pack(side="left", padx=2)
             self._mk_int_entry(row_fr, pv, width=5, justify="center").pack(side="left", padx=2)
             ttk.Label(row_fr, text="%").pack(side="left", padx=(0, 8))
