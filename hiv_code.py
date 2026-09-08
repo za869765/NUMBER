@@ -710,6 +710,10 @@ def import_xlsx_profiles(path):
         for k in blank_keys:
             if k in DEMO_FILL_KEYS or k in RISK_KEYS:   # v1.3.3 風險題也計缺格
                 blank_counts[k] = blank_counts.get(k, 0) + 1
+            # 子題留空但上層題使用者已明確填「是」→ 另計 __direct（卡片要顯示、筆數要算進去）
+            pk = RISK_PARENT.get(k)
+            if pk and pk not in blank_keys and prof.get(pk) == RISK_TRIGGER_VALUE:
+                blank_counts[k + "__direct"] = blank_counts.get(k + "__direct", 0) + 1
         if row_blanks:
             blanks_by_row.append((ridx, row_blanks))
         _y = _normalize_birth_year(prof.get("year"))   # v1.2.4 末2碼→西元
@@ -2196,13 +2200,12 @@ class HivaWorker:
             "if(p.done>0){return 'done';} if(p.started>0){return 'busy';} return 'idle';")
         radio_xp = f"//input[@type='radio' and @name=\"{name}\" and @value=\"{value}\"]"
         for attempt in range(retries + 1):
-            # 重試時若上一輪其實已勾選（只是欄位等待逾時），再點同一顆不會觸發 postback → 跳過點擊直接驗證
-            already = False
-            if attempt > 0:
-                try:
-                    already = d.find_element(By.XPATH, radio_xp).is_selected()
-                except Exception:
-                    already = False
+            # 若已勾選（recovery 重填、或上一輪只是欄位等待逾時），再點同一顆不會觸發 postback
+            # → 跳過點擊直接驗證（否則 poll 會空等整個 wait_timeout）
+            try:
+                already = d.find_element(By.XPATH, radio_xp).is_selected()
+            except Exception:
+                already = False
             hooked = False
             if not already:
                 try:
@@ -4040,14 +4043,19 @@ class App:
         pkey = RISK_PARENT.get(key)
         if pkey is None:
             return True
+        # 子題：上層卡片顯示中且「是」>0，或 xlsx 裡上層已明確填「是」而子題留空（__direct）
+        if bc.get(key + "__direct", 0) > 0:
+            return True
         return self._risk_card_shown(pkey, bc) and self._risk_parent_yes_pct(key) > 0
 
     def _risk_expected_n(self, key, bc):
-        """卡片「N 筆」：主題＝缺格數；子題＝上層預估筆數 × 上層「是」比例"""
+        """卡片「N 筆」：主題＝缺格數；子題＝上層已填「是」的直接缺格 + 上層預估筆數 × 上層「是」比例"""
         pkey = RISK_PARENT.get(key)
         if pkey is None:
             return bc.get(key, 0)
-        return int(round(self._risk_expected_n(pkey, bc) * self._risk_parent_yes_pct(key) / 100))
+        direct = bc.get(key + "__direct", 0)
+        parent_n = self._risk_expected_n(pkey, bc) if self._risk_card_shown(pkey, bc) else 0
+        return direct + int(round(parent_n * self._risk_parent_yes_pct(key) / 100))
 
     def _render_blank_summary(self):
         """重畫缺格摘要列：缺格>0 藍字粗體、0 灰字；控制出生年列／年月列顯示"""
@@ -4086,8 +4094,9 @@ class App:
         else:
             self._blank_ym_lbl.pack_forget()
         # v1.3.3 風險題缺格（只算主題）
-        risk_parent_keys = [k for k in RISK_KEYS if RISK_PARENT.get(k) is None]
-        risk_n = sum(1 for k in risk_parent_keys if bc.get(k, 0) > 0)
+        # 主題留空，或子題留空且上層已明確填「是」（__direct），都算「有風險題可補」
+        risk_n = sum(1 for k in RISK_KEYS
+                     if bc.get(k, 0) > 0 and (RISK_PARENT.get(k) is None or bc.get(k + "__direct", 0) > 0))
         if risk_n:
             self._blank_risk_lbl_var.set(f"● 風險題 Q1～Q13 有 {risk_n} 題留空 →")
             self._blank_risk_fr.pack(fill="x", padx=8, pady=(2, 6))
@@ -4289,6 +4298,9 @@ class App:
             for k in bl:
                 if k in DEMO_FILL_KEYS or k in RISK_KEYS:
                     bc[k] = bc.get(k, 0) + 1
+                pk = RISK_PARENT.get(k)
+                if pk and pk not in bl and p.get(pk) == RISK_TRIGGER_VALUE:
+                    bc[k + "__direct"] = bc.get(k + "__direct", 0) + 1
             if "last_screen_ym" in bl and p.get("testing_habit") == "是":
                 bc["last_screen_ym"] = bc.get("last_screen_ym", 0) + 1
         self._blank_counts = bc
