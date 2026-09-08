@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -482,6 +482,51 @@ REQUIRED_KEYS_FOR_WARN = {
 # v1.2.2/v1.3.1 完整模式空格可依比例卡片補齊的 8 個基本欄位（順序＝面板顯示順序）
 DEMO_FILL_KEYS = ("gender", "nation", "year", "res18", "resCur", "orient", "edu", "testing_habit")
 
+# v1.3.3 完整模式「風險題依設定補齊」卡片：(key, 卡片標題, 上層題 key, 選項, 預設比例)
+#   上層題 key 不為 None 的是「連帶衍生題」：只有上層卡片的「是」比例 > 0 才會出現，
+#   且產池時只對「上層抽到是」的那幾筆填（與網站條件顯示一致，像篩檢習慣=是 → 篩檢年月）
+#   主題在前、子題在後（產池依此順序）；自由文字題（HIV原因/其他性病/其他藥物）不做卡片，要填請在 xlsx 填
+RISK_CARD_DEFS = [
+    ("q1_sex",          "Q1 過性行為",        None,          ["是", "否"],               [0, 100]),
+    ("q2_condom",       "Q2 全程保險套",      "q1_sex",      ["是", "否", "沒有發生"],   [0, 100, 0]),
+    ("q3_regular",      "Q3 跟固定性伴侶",    "q1_sex",      ["是", "否", "沒有發生"],   [0, 100, 0]),
+    ("q4_alcohol",      "Q4 用酒",            "q1_sex",      ["是", "否", "沒有發生"],   [0, 100, 0]),
+    ("q5_drug",         "Q5 用藥",            "q1_sex",      ["是", "否", "沒有發生"],   [0, 100, 0]),
+    ("q6_std",          "Q6 感染性病",        None,          ["是", "否"],               [0, 100]),
+    ("q6_hiv",          "Q6.1 HIV",           "q6_std",      ["是", "否"],               [0, 100]),
+    ("q6_warts",        "Q6.2 菜花",          "q6_std",      ["是", "否"],               [0, 100]),
+    ("q6_syphilis",     "Q6.3 梅毒",          "q6_std",      ["是", "否"],               [0, 100]),
+    ("q6_gonorrhea",    "Q6.4 淋病",          "q6_std",      ["是", "否"],               [0, 100]),
+    ("q6_chlamydia",    "Q6.5 披衣菌",        "q6_std",      ["是", "否"],               [0, 100]),
+    ("q6_herpes",       "Q6.6 疱疹",          "q6_std",      ["是", "否"],               [0, 100]),
+    ("q6_hepA",         "Q6.7 A肝",           "q6_std",      ["是", "否"],               [0, 100]),
+    ("q6_hepC",         "Q6.8 C肝",           "q6_std",      ["是", "否"],               [0, 100]),
+    ("q7_drug_use",     "Q7 成癮藥物",        None,          ["是", "否"],               [0, 100]),
+    ("q7_amph",         "Q7.1 安非他命",      "q7_drug_use", ["是", "否"],               [0, 100]),
+    ("q7_amph_method",  "Q7.1 使用方式",      "q7_amph",     ["吸入", "注射", "口服"],   [100, 0, 0]),
+    ("q7_ghb",          "Q7.2 G水",           "q7_drug_use", ["是", "否"],               [0, 100]),
+    ("q7_mdma",         "Q7.3 搖頭丸",        "q7_drug_use", ["是", "否"],               [0, 100]),
+    ("q7_ketamine",     "Q7.4 K他命",         "q7_drug_use", ["是", "否"],               [0, 100]),
+    ("q7_rush",         "Q7.5 RUSH",          "q7_drug_use", ["是", "否"],               [0, 100]),
+    ("q7_meph",         "Q7.6 喵喵",          "q7_drug_use", ["是", "否"],               [0, 100]),
+    ("q7_heroin",       "Q7.7 海洛因",        "q7_drug_use", ["是", "否"],               [0, 100]),
+    ("q7_marijuana",    "Q7.8 大麻",          "q7_drug_use", ["是", "否"],               [0, 100]),
+    ("q7_status",       "Q7 目前使用狀態",    "q7_drug_use", ["還在使用", "已停用"],     [0, 100]),
+    ("q8a_online",      "Q8a 網路認識",       None,          ["是", "否"],               [0, 100]),
+    ("q8b_venue",       "Q8b 娛樂場所認識",   None,          ["是", "否"],               [0, 100]),
+    ("q8c_sex_worker",  "Q8c 性交易服務者",   None,          ["是", "否"],               [0, 100]),
+    ("q8d_sex_consumer","Q8d 性交易消費者",   None,          ["是", "否"],               [0, 100]),
+    ("q9_partner_hiv",  "Q9 固定伴侶HIV",     None,          ["是", "否", "不確定", "目前沒有固定性伴侶"], [0, 100, 0, 0]),
+    ("q10_pep_used",    "Q10 PEP使用過",      None,          ["是", "否"],               [0, 100]),
+    ("q11_pep_want",    "Q11 PEP想服用",      None,          ["是", "否"],               [0, 100]),
+    ("q12_prep_heard",  "Q12 聽過PrEP",       None,          ["是", "否"],               [0, 100]),
+    ("q13_prep_want",   "Q13 PrEP想服用",     None,          ["是", "否"],               [0, 100]),
+]
+RISK_KEYS = [k for k, _, _, _, _ in RISK_CARD_DEFS]
+RISK_PARENT = {k: p for k, _, p, _, _ in RISK_CARD_DEFS}
+# 衍生題「觸發值」：上層題抽到這個值才填子題（q7_amph_method 的上層是 q7_amph=是）
+RISK_TRIGGER_VALUE = "是"
+
 # v1.2.2 性別欄容許用 1/2/3/4 代碼（或「1男」之類）對應回 男/女/跨性別/其他
 GENDER_CODE_MAP = {"1": "男", "2": "女", "3": "跨性別", "4": "其他"}
 def _normalize_gender(v):
@@ -663,7 +708,7 @@ def import_xlsx_profiles(path):
                 prof[k] = actual
         prof["_blanks"] = blank_keys   # v1.2.2 內部標記（執行前 _build_pool_for_mode 會清掉）
         for k in blank_keys:
-            if k in DEMO_FILL_KEYS:
+            if k in DEMO_FILL_KEYS or k in RISK_KEYS:   # v1.3.3 風險題也計缺格
                 blank_counts[k] = blank_counts.get(k, 0) + 1
         if row_blanks:
             blanks_by_row.append((ridx, row_blanks))
@@ -1361,13 +1406,15 @@ class HivaWorker:
                     WebDriverWait(d, self.dly.wait_timeout).until(
                         lambda drv: len(self._get_questwizard_groups()) >= 1 + len(PAGE2_SUB_KEYS) - 2
                     )
-                    self._fill_groups_in_order(profile, PAGE2_SUB_KEYS, start_index=1)
-                    # text 欄位
-                    self._fill_text_input_by_label("原因", profile.get("q6_hiv_reason", ""))
-                    self._fill_text_input_by_label("其他", profile.get("q6_other", ""))
+                    # v1.3.3：改明確 name+value（DOM 順序對應會把「愛滋」的 testHIV_x value 對錯）
+                    n_sub = self._fill_p2_subs(profile)
+                    self.log(f"  ✓ Q6 細項填 {n_sub}/{len(self._P2_SUB_RADIO)} 題")
                 except Exception as e:
                     self.log(f"  ⚠ Q6 子題填寫失敗：{e}")
-            recovery_p2 = lambda: self._fill_groups_in_order(profile, [PAGE2_BASE_KEY])
+            def recovery_p2():
+                self._fill_groups_in_order(profile, [PAGE2_BASE_KEY])
+                if profile.get("q6_std") == "是":
+                    self._fill_p2_subs(profile)
         else:
             if not self._click_first_group_no():
                 self.log("✗ Page 2 Q6 失敗"); save_debug_snapshot(d, "p2_q6_fail"); return None
@@ -1387,18 +1434,15 @@ class HivaWorker:
                     WebDriverWait(d, self.dly.wait_timeout).until(
                         lambda drv: len(self._get_questwizard_groups()) >= 1 + len(PAGE3_SUB_KEYS) - 2
                     )
-                    self._fill_groups_in_order(profile, PAGE3_SUB_KEYS, start_index=1)
-                    self._fill_text_input_by_label("其他", profile.get("q7_other", ""))
-                    # v1.0.23 安非他命使用方式：多 checkbox（吸入/注射/口服）
-                    if profile.get("q7_amph") == "是":
-                        method_str = profile.get("q7_amph_method", "") or ""
-                        methods = [s.strip() for s in str(method_str).replace("，", ",").split(",") if s.strip()]
-                        if methods:
-                            n = self._click_checkboxes_by_text(methods)
-                            self.log(f"  ✓ 安非他命使用方式 勾選 {n}/{len(methods)} 項")
+                    # v1.3.3：改明確 name+value（安非他命 value 是 安非他命_1/2，DOM 順序對應會對錯）
+                    n_sub = self._fill_p3_subs(profile)
+                    self.log(f"  ✓ Q7 細項填 {n_sub}/{len(self._P3_SUB_RADIO) + 1} 題")
                 except Exception as e:
                     self.log(f"  ⚠ Q7 子題填寫失敗：{e}")
-            recovery_p3 = lambda: self._fill_groups_in_order(profile, [PAGE3_BASE_KEY])
+            def recovery_p3():
+                self._fill_groups_in_order(profile, [PAGE3_BASE_KEY])
+                if profile.get("q7_drug_use") == "是":
+                    self._fill_p3_subs(profile)
         else:
             if not self._click_first_group_no():
                 self.log("✗ Page 3 Q7 失敗"); save_debug_snapshot(d, "p3_q7_fail"); return None
@@ -1586,7 +1630,14 @@ class HivaWorker:
         "rdlRegularScreening": "testing_habit",
         "rblHasSex": "q1_sex", "rdlAnalSexUseCondoms": "q2_condom", "rblSexFix": "q3_regular",
         "rdlWithWine": "q4_alcohol", "rdlWithDrug": "q5_drug", "rdlAnsHaveSTD": "q6_std",
+        # 第二頁性病細項（v1.3.3 真站傾印）
+        "愛滋": "q6_hiv", "菜花": "q6_warts", "梅毒": "q6_syphilis", "淋病": "q6_gonorrhea",
+        "披衣": "q6_chlamydia", "疱疹": "q6_herpes", "A型肝炎": "q6_hepA", "RBL_C": "q6_hepC",
         "成癮藥物": "q7_drug_use",
+        # 第三頁藥物細項（v1.3.3 真站傾印）
+        "安非他命": "q7_amph", "RBL_GWater": "q7_ghb", "搖頭丸": "q7_mdma", "K他命": "q7_ketamine",
+        "RUSH": "q7_rush", "RBL_Cat": "q7_meph", "海洛因": "q7_heroin", "大麻": "q7_marijuana",
+        "使用狀態": "q7_status",
         "網交": "q8a_online", "娛樂場所": "q8b_venue", "性服務": "q8c_sex_worker", "性消費": "q8d_sex_consumer",
         "HIV感染者": "q9_partner_hiv", "預防性投藥": "q10_pep_used", "PEP想服用": "q11_pep_want",
         "聽過PrEP": "q12_prep_heard", "PrEP想服用": "q13_prep_want",
@@ -1671,6 +1722,8 @@ class HivaWorker:
                 key = self._RED_GROUP_TO_KEY.get(group)
                 val = self._profile_value_for(key) if key else None
                 rv = self._option_value(key, val) if key else None
+                if group in self._SPECIAL_VALUE_PREFIX and key:   # v1.3.3 特例 value testHIV_x / 安非他命_x
+                    rv = self._p2_value(group, val)
                 if rv is None:
                     # 對照不到的題目不猜值（猜「否」會讓網站答案≠Excel 紀錄），記 log 交給 recovery_fn
                     self.log(f"  ⚠ 反紅題目 {group} 沒有對照，略過")
@@ -1678,6 +1731,8 @@ class HivaWorker:
                 label = OUTPUT_LABELS.get(key, group)
                 if group == "rdlRegularScreening":
                     ok = self._set_p7_habit(rv, retries=0)
+                elif group in self._SPECIAL_VALUE_PREFIX:   # 愛滋 / 安非他命 都掛 postback
+                    ok = self._set_radio_postback(name, rv, retries=0, label=label)
                 else:
                     ok = self._set_radio_for_group(name, rv)
                 self.log(f"  ↻ 反紅補填：{label} → {val if val is not None else rv}{'' if ok else '（失敗）'}")
@@ -2117,12 +2172,19 @@ class HivaWorker:
     _P7_LAST_YM_NAME = "ctl00$MainContent$QuestWizard$LastTimeScreening"
 
     def _set_p7_habit(self, value, retries=1):
-        """點篩檢習慣 radio → 等 ASP.NET 非同步 PostBack 真正開始並結束（或整頁重載完成）
-           → 重新定位確認勾選狀態（UpdatePanel 會換掉舊元素，不能沿用 WebElement）。
-           value: 1=是 / 2=否 / 0=從未做過"""
+        """第七頁篩檢習慣：value 1=是 / 2=否 / 0=從未做過；選「是」要等 LastTimeScreening 出現"""
+        return self._set_radio_postback(self._P7_HABIT_NAME, value, retries=retries,
+                                        wait_name=(self._P7_LAST_YM_NAME if value == "1" else None),
+                                        label="篩檢習慣")
+
+    def _set_radio_postback(self, name, value, retries=1, wait_name=None, label=""):
+        """v1.3.3 泛化：點掛 __doPostBack 的 radio → 等 ASP.NET 非同步 PostBack 真正開始並結束
+           （或整頁重載完成）→ 重新定位確認勾選狀態（UpdatePanel 會換掉舊元素，不能沿用 WebElement）。
+           wait_name：勾選後還要等這個 name 的元素出現（衍生欄位）"""
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
         d = self.driver
+        label = label or name.split("$")[-1]
         hook_js = (
             "try{var m=Sys.WebForms.PageRequestManager.getInstance();"
             "window.__hivPB={started:0,done:0};"
@@ -2132,7 +2194,7 @@ class HivaWorker:
         poll_js = (
             "var p=window.__hivPB; if(!p){return 'reloaded';}"
             "if(p.done>0){return 'done';} if(p.started>0){return 'busy';} return 'idle';")
-        radio_xp = f"//input[@type='radio' and @name=\"{self._P7_HABIT_NAME}\" and @value=\"{value}\"]"
+        radio_xp = f"//input[@type='radio' and @name=\"{name}\" and @value=\"{value}\"]"
         for attempt in range(retries + 1):
             # 重試時若上一輪其實已勾選（只是欄位等待逾時），再點同一顆不會觸發 postback → 跳過點擊直接驗證
             already = False
@@ -2147,7 +2209,7 @@ class HivaWorker:
                     hooked = bool(d.execute_script(hook_js))
                 except Exception:
                     hooked = False
-                if not self._set_radio_by_name(self._P7_HABIT_NAME, value):
+                if not self._set_radio_by_name(name, value):
                     return False
             if already:
                 pass
@@ -2170,25 +2232,117 @@ class HivaWorker:
                     except Exception:
                         pass
                 elif state != "done":
-                    self.log("  ⚠ 篩檢習慣 postback 未回應，改用固定等待")
+                    self.log(f"  ⚠ {label} postback 未回應，改用固定等待")
                     time.sleep(1.0)
             else:
                 time.sleep(1.2)   # 沒有 PageRequestManager（網站又改版？）→ 固定等待
             # 重新定位驗證勾選狀態
             try:
-                el = d.find_element(By.XPATH,
-                    f"//input[@type='radio' and @name=\"{self._P7_HABIT_NAME}\" and @value=\"{value}\"]")
+                el = d.find_element(By.XPATH, radio_xp)
                 if el.is_selected():
-                    if value == "1":
+                    if wait_name:
                         WebDriverWait(d, self.dly.wait_timeout).until(
-                            lambda drv: drv.find_elements(By.NAME, self._P7_LAST_YM_NAME))
+                            lambda drv: drv.find_elements(By.NAME, wait_name))
                     return True
             except Exception as e:
-                self.log(f"  ⚠ 篩檢習慣重新定位失敗：{e}")
+                self.log(f"  ⚠ {label} 重新定位失敗：{e}")
             if attempt < retries:
-                self.log("  ↻ 篩檢習慣勾選未生效，重試一次")
-        self.log("✗ 篩檢習慣 radio 勾選未生效")
+                self.log(f"  ↻ {label} 勾選未生效，重試一次")
+        self.log(f"✗ {label} radio 勾選未生效")
         return False
+
+    # ── v1.3.3 第二頁性病細項：明確 name+value（真站傾印 2026-09-08）──
+    #   「愛滋」value 是 testHIV_1/testHIV_2 且掛 __doPostBack；其餘 1=是 2=否
+    _P2_SUB_RADIO = [("q6_hiv", "愛滋"), ("q6_warts", "菜花"), ("q6_syphilis", "梅毒"),
+                     ("q6_gonorrhea", "淋病"), ("q6_chlamydia", "披衣"), ("q6_herpes", "疱疹"),
+                     ("q6_hepA", "A型肝炎"), ("q6_hepC", "RBL_C")]
+    _P2_TEXT = [("q6_hiv_reason", "AnsTestHIVReason"), ("q6_other", "性病")]
+
+    # ── v1.3.3 第三頁藥物細項（真站傾印 2026-09-08）：
+    #   「安非他命」value 安非他命_1/安非他命_2 且掛 __doPostBack；使用方式是三個 checkbox name=吸入/注射/口服；
+    #   G水=RBL_GWater、喵喵=RBL_Cat（cathinone）、其他藥物文字欄 name=藥物、使用狀態 1=還在使用 2=已停用
+    _P3_SUB_RADIO = [("q7_amph", "安非他命"), ("q7_ghb", "RBL_GWater"), ("q7_mdma", "搖頭丸"),
+                     ("q7_ketamine", "K他命"), ("q7_rush", "RUSH"), ("q7_meph", "RBL_Cat"),
+                     ("q7_heroin", "海洛因"), ("q7_marijuana", "大麻")]
+    _P3_METHOD_CB = ["吸入", "注射", "口服"]
+    _SPECIAL_VALUE_PREFIX = {"愛滋": "testHIV_", "安非他命": "安非他命_"}   # 是→_1 否→_2
+
+    @classmethod
+    def _p2_value(cls, group, val):
+        """radio value：特例群組用 prefix_1/_2，其餘 1=是 2=否"""
+        yes = (str(val or "").strip() == "是")
+        pre = cls._SPECIAL_VALUE_PREFIX.get(group)
+        if pre:
+            return pre + ("1" if yes else "2")
+        return "1" if yes else "2"
+
+    def _fill_p3_subs(self, profile):
+        """Q7=是 後填藥物細項 + 安非他命使用方式 checkbox + 其他藥物文字 + 使用狀態；回填成功數"""
+        from selenium.webdriver.common.by import By
+        prefix = "ctl00$MainContent$QuestWizard$"
+        d = self.driver
+        n = 0
+        for key, group in self._P3_SUB_RADIO:
+            val = profile.get(key) or "否"
+            rv = self._p2_value(group, val)
+            if group == "安非他命":
+                ok = self._set_radio_postback(prefix + group, rv, retries=1, label="Q7.1 安非他命")
+            else:
+                ok = self._set_radio_by_name(prefix + group, rv)
+            if ok: n += 1
+            else: self.log(f"  ✗ Q7 細項 {group}={val} 點選失敗")
+            self.dly.action()
+        if (profile.get("q7_amph") or "否") == "是":
+            methods = [s.strip() for s in str(profile.get("q7_amph_method", "") or "").replace("，", ",").split(",") if s.strip()]
+            if not methods:
+                methods = ["吸入"]
+                profile["q7_amph_method"] = "吸入"
+            got = 0
+            for m in methods:
+                if m not in self._P3_METHOD_CB:
+                    self.log(f"  ⚠ 使用方式「{m}」不在 吸入/注射/口服，略過"); continue
+                try:
+                    cb = d.find_element(By.NAME, prefix + m)
+                    if not cb.is_selected():
+                        d.execute_script("arguments[0].scrollIntoView({block:'center'});", cb)
+                        try: cb.click()
+                        except Exception: d.execute_script("arguments[0].click();", cb)
+                    if d.find_element(By.NAME, prefix + m).is_selected():
+                        got += 1
+                except Exception as e:
+                    self.log(f"  ⚠ 使用方式 {m} 勾選失敗：{e}")
+            self.log(f"  ✓ 安非他命使用方式 勾選 {got}/{len(methods)} 項")
+        other = profile.get("q7_other", "")
+        if other:
+            self._fill_text_input_by_name(prefix + "藥物", other)
+        status = profile.get("q7_status") or "已停用"
+        sv = "1" if status == "還在使用" else "2"
+        if self._set_radio_by_name(prefix + "使用狀態", sv):
+            n += 1
+            profile["q7_status"] = status
+        else:
+            self.log("  ✗ Q7 使用狀態 點選失敗")
+        return n
+
+    def _fill_p2_subs(self, profile):
+        """Q6=是 後填 8 個性病細項 + 2 個文字欄；回填成功數"""
+        prefix = "ctl00$MainContent$QuestWizard$"
+        n = 0
+        for key, group in self._P2_SUB_RADIO:
+            val = profile.get(key) or "否"
+            rv = self._p2_value(group, val)
+            if group == "愛滋":
+                ok = self._set_radio_postback(prefix + group, rv, retries=1, label="Q6.1 HIV")
+            else:
+                ok = self._set_radio_by_name(prefix + group, rv)
+            if ok: n += 1
+            else: self.log(f"  ✗ Q6 細項 {group}={val} 點選失敗")
+            self.dly.action()
+        for key, tname in self._P2_TEXT:
+            v = profile.get(key, "")
+            if v:
+                self._fill_text_input_by_name(prefix + tname, v)
+        return n
 
     def _set_input_value_js(self, name, value):
         """v1.3.1：用 JS 直接設 input value（LastTimeScreening 的 onclick 會彈月曆，避免 click/send_keys）"""
@@ -2411,6 +2565,10 @@ class App:
             self.preview_tree.heading(c, text=c)
             self.preview_tree.column(c, width=w, anchor="center")
         self.preview_tree.pack(fill="x", padx=4, pady=4)
+        # v1.3.3：雙擊一列 → 彈窗編輯該筆全部欄位（留空＝依設定補齊）
+        self.preview_tree.bind("<Double-1>", self._on_preview_double_click)
+        ttk.Label(preview_fr, text="💡 雙擊任一列可開啟彈窗修改該筆全部選項（留空＝依下方設定補齊）",
+                  foreground="#7d8696", font=("微軟正黑體", 9)).pack(anchor="w", padx=8, pady=(0, 4))
         self._batch_preview_fr = preview_fr
         # 簡易模式時不要 pack 顯示
 
@@ -2624,8 +2782,14 @@ class App:
         stat_fr.pack(fill="x", padx=6, pady=(0, 4))
         # 左側：自動開啟 Excel checkbox
         self.auto_open_xlsx = tk.BooleanVar(value=True)
-        ttk.Checkbutton(stat_fr, text="完成後自動停止並開啟 Excel",
-                        variable=self.auto_open_xlsx).pack(side="right", padx=8)
+        # v1.3.3：放大＋醒目（使用者反映太小不明顯）
+        try:
+            ttk.Style().configure("Big.TCheckbutton", font=("微軟正黑體", 12, "bold"), foreground="#1565c0",
+                                  padding=(8, 4))
+        except Exception:
+            pass
+        ttk.Checkbutton(stat_fr, text="✅ 完成後自動停止並開啟 Excel",
+                        variable=self.auto_open_xlsx, style="Big.TCheckbutton").pack(side="right", padx=8)
         # 中央：統計
         self.stats_var = tk.StringVar(value="平均 — 秒/筆   |   已用 00m00s   |   剩餘 —   |   預計完成 —")
         self.stats_label = ttk.Label(stat_fr, textvariable=self.stats_var,
@@ -2700,7 +2864,7 @@ class App:
         if key:
             self._demo_cards.append((key, card, parent))
 
-    def _make_pct_block(self, title, options, defaults, parent=None, palette=None, key=None):
+    def _make_pct_block(self, title, options, defaults, parent=None, palette=None, key=None, register=True):
         """v1.0.49 dashboard 卡片版（取代 v1.0.x LabelFrame）：
         頂部 title + 「∑ N%」狀態 → 水平堆疊比例條 → legend 列（色點 + 標籤 + entry + 筆數）
         參考 Claude Design 概念稿 exe_concept.html 3.3 人物輪廓卡。
@@ -2715,7 +2879,10 @@ class App:
         # 卡容器
         card = ttk.Frame(parent or self.root, padding=(12, 8))
         card.pack(fill="x", padx=6, pady=4)
-        self._register_demo_card(key, card, parent or self.root)
+        if register:
+            self._register_demo_card(key, card, parent or self.root)
+        else:
+            self._last_card_frame = card   # v1.3.3 風險題卡片由呼叫端自行登記
 
         # Header：標題 + 總和狀態（滿 100% 時灰，否則橘色提示）
         header = ttk.Frame(card)
@@ -3093,6 +3260,13 @@ class App:
                            ("edu", self.edu_pcts), ("orient", self.orient_pcts),
                            ("testing_habit", self.testing_pcts)):
             n = bc.get(key, 0) if complete else tot
+            for op, v, cnt in block:
+                try: pv = v.get()
+                except Exception: pv = 0
+                cnt.set(f"{int(round(n * pv / 100))} 筆")
+        # v1.3.3 風險題卡片：主題＝缺格數；子題＝上層預估筆數 × 上層「是」比例
+        for key, block in getattr(self, "_risk_pcts", {}).items():
+            n = self._risk_expected_n(key, bc) if complete else 0
             for op, v, cnt in block:
                 try: pv = v.get()
                 except Exception: pv = 0
@@ -3764,11 +3938,13 @@ class App:
                 # v1.3.1：預覽 → 缺格面板 → 只含缺格欄位卡片的 midbar（pack 順序即畫面順序）
                 self._blank_panel.pack(fill="x", padx=6, pady=(0, 4))
                 self._batch_midbar.pack(fill="x", padx=6, pady=4)
+                self._risk_bar.pack_forget()   # v1.3.3 由 _apply_card_visibility 決定是否 pack（順序在 midbar 之後）
                 self.log("📋 切換到完整模式（請匯入 xlsx）")
             else:
                 self._batch_xlsx_tools.pack_forget()  # v1.0.44
                 self._batch_preview_fr.pack_forget()
                 self._blank_panel.pack_forget()
+                self._risk_bar.pack_forget()
                 self._batch_midbar.pack_forget()
                 self._batch_topbar.pack(fill="x", padx=6, pady=4)
                 self._batch_midbar.pack(fill="x", padx=6, pady=4)
@@ -3798,7 +3974,80 @@ class App:
         self._blank_ym_var = tk.StringVar(value="")
         self._blank_ym_lbl = ttk.Label(panel, textvariable=self._blank_ym_var,
                                        font=("微軟正黑體", 10), foreground="#c39145")
+        # v1.3.3 風險題開關列（缺風險題時才顯示）
+        self.risk_mode_var = tk.StringVar(value="no")
+        self._blank_risk_fr = ttk.Frame(panel)
+        self._blank_risk_lbl_var = tk.StringVar(value="")
+        ttk.Label(self._blank_risk_fr, textvariable=self._blank_risk_lbl_var,
+                  font=("微軟正黑體", 10, "bold"), foreground="#b71c1c").pack(side="left")
+        ttk.Radiobutton(self._blank_risk_fr, text="維持「否」（預設）", variable=self.risk_mode_var, value="no",
+                        command=lambda: (self._apply_card_visibility(), self._update_counts())).pack(side="left", padx=(8, 4))
+        ttk.Radiobutton(self._blank_risk_fr, text="依下方風險題卡片補齊", variable=self.risk_mode_var, value="custom",
+                        command=lambda: (self._apply_card_visibility(), self._update_counts())).pack(side="left", padx=4)
+        ttk.Label(self._blank_risk_fr, text="（主題的「是」比例 > 0 時，其衍生子題卡片會連帶出現）",
+                  foreground="#7d8696", font=("微軟正黑體", 9)).pack(side="left", padx=6)
+        # 風險題卡片區（三欄），放在 midbar 之後，由 _on_mode_change 決定 pack
+        self._risk_bar = ttk.LabelFrame(parent, text="⚠ 風險題補齊（只顯示有缺格的題目；子題只在上層「是」> 0 時出現）")
+        cols = [ttk.Frame(self._risk_bar) for _ in range(3)]
+        for i, c in enumerate(cols):
+            c.pack(side="left", fill="both", expand=True, padx=(0 if i == 0 else 4, 0 if i == 2 else 4))
+        self._risk_pcts = {}
+        self._risk_cards = []   # [(key, card, parent_frame)]
+        for i, (key, title, pkey, opts, defs) in enumerate(RISK_CARD_DEFS):
+            col = cols[i % 3]
+            t = ("　↳ " + title) if pkey else title
+            pal = ["#ef9a9a", "#ffcdd2", "#ffebee", "#fff5f5"] if pkey else ["#e57373", "#ef9a9a", "#ffcdd2", "#ffebee"]
+            blk = self._make_pct_block(t, opts, defs, parent=col, palette=pal, key=key, register=False)
+            card = self._last_card_frame
+            card.pack_forget()
+            self._risk_pcts[key] = blk
+            self._risk_cards.append((key, card, col))
+            # 「是」比例變動 → 子題卡片連帶出現/隱藏、筆數更新
+            for op, v, _ in blk:
+                if op == RISK_TRIGGER_VALUE:
+                    v.trace_add("write", lambda *a: self._schedule_card_refresh())
         self._render_blank_summary()
+
+    def _schedule_card_refresh(self):
+        """v1.3.3：比例輸入時會連續觸發 trace，合併成 120ms 後刷新一次"""
+        try:
+            if getattr(self, "_card_refresh_job", None):
+                self.root.after_cancel(self._card_refresh_job)
+            self._card_refresh_job = self.root.after(
+                120, lambda: (setattr(self, "_card_refresh_job", None),
+                              self._apply_card_visibility(), self._update_counts()))
+        except Exception:
+            pass
+
+    def _risk_parent_yes_pct(self, key):
+        """上層題卡片的「是」比例（沒有上層回 100）"""
+        pkey = RISK_PARENT.get(key)
+        if not pkey:
+            return 100
+        try:
+            for op, v, _ in self._risk_pcts[pkey]:
+                if op == RISK_TRIGGER_VALUE:
+                    return max(0, v.get())
+        except Exception:
+            pass
+        return 0
+
+    def _risk_card_shown(self, key, bc):
+        """風險題卡片是否該顯示：完整模式+勾補齊+風險模式 custom+該題有缺格+上層題顯示中且「是」>0"""
+        if not (self._in_complete_fill() and self.fill_blank_random_var.get()
+                and self.risk_mode_var.get() == "custom" and bc.get(key, 0) > 0):
+            return False
+        pkey = RISK_PARENT.get(key)
+        if pkey is None:
+            return True
+        return self._risk_card_shown(pkey, bc) and self._risk_parent_yes_pct(key) > 0
+
+    def _risk_expected_n(self, key, bc):
+        """卡片「N 筆」：主題＝缺格數；子題＝上層預估筆數 × 上層「是」比例"""
+        pkey = RISK_PARENT.get(key)
+        if pkey is None:
+            return bc.get(key, 0)
+        return int(round(self._risk_expected_n(pkey, bc) * self._risk_parent_yes_pct(key) / 100))
 
     def _render_blank_summary(self):
         """重畫缺格摘要列：缺格>0 藍字粗體、0 灰字；控制出生年列／年月列顯示"""
@@ -3836,6 +4085,14 @@ class App:
             self._blank_ym_lbl.pack(fill="x", padx=8, pady=(2, 6))
         else:
             self._blank_ym_lbl.pack_forget()
+        # v1.3.3 風險題缺格（只算主題）
+        risk_parent_keys = [k for k in RISK_KEYS if RISK_PARENT.get(k) is None]
+        risk_n = sum(1 for k in risk_parent_keys if bc.get(k, 0) > 0)
+        if risk_n:
+            self._blank_risk_lbl_var.set(f"● 風險題 Q1～Q13 有 {risk_n} 題留空 →")
+            self._blank_risk_fr.pack(fill="x", padx=8, pady=(2, 6))
+        else:
+            self._blank_risk_fr.pack_forget()
 
     def _apply_card_visibility(self):
         """簡易模式：全部卡片顯示；完整模式：只顯示有缺格的欄位卡片（同一父容器 pack/pack_forget，保持原順序）"""
@@ -3851,6 +4108,22 @@ class App:
                 show = True
             if show:
                 card.pack(fill="x", padx=6, pady=4)
+        # v1.3.3 風險題卡片：主題有缺格才顯示；子題連帶（上層顯示中且「是」> 0）
+        any_risk = False
+        for key, card, col in getattr(self, "_risk_cards", []):
+            card.pack_forget()
+        for key, card, col in getattr(self, "_risk_cards", []):
+            if self.mode_var.get() == "完整（匯入xlsx）" and self._risk_card_shown(key, bc):
+                card.pack(fill="x", padx=6, pady=4)
+                any_risk = True
+        try:
+            if any_risk:
+                if not self._risk_bar.winfo_manager():
+                    self._risk_bar.pack(fill="x", padx=6, pady=4)
+            else:
+                self._risk_bar.pack_forget()
+        except Exception:
+            pass
 
     def _export_sample_xlsx(self):
         ensure_outdir()
@@ -3993,6 +4266,136 @@ class App:
                   command=do_cancel).pack(side="left", padx=10)
         modal.wait_window()
         return result["go"]
+
+    # ── v1.3.3 預覽列雙擊 → 彈窗編輯該筆 ──
+    _BLANK_CHOICE = "（留空＝依設定補齊）"
+
+    def _on_preview_double_click(self, event):
+        try:
+            item = self.preview_tree.identify_row(event.y)
+            if not item:
+                return
+            idx = int(self.preview_tree.item(item, "values")[0]) - 1
+        except Exception:
+            return
+        if 0 <= idx < len(self._imported_profiles):
+            self._edit_profile_dialog(idx)
+
+    def _recount_blanks(self):
+        """編輯後依每筆 _blanks 重算 _blank_counts（規則同 import_xlsx_profiles）"""
+        bc = {}
+        for p in self._imported_profiles:
+            bl = set(p.get("_blanks", []))
+            for k in bl:
+                if k in DEMO_FILL_KEYS or k in RISK_KEYS:
+                    bc[k] = bc.get(k, 0) + 1
+            if "last_screen_ym" in bl and p.get("testing_habit") == "是":
+                bc["last_screen_ym"] = bc.get("last_screen_ym", 0) + 1
+        self._blank_counts = bc
+
+    def _edit_profile_dialog(self, idx):
+        """彈窗：該筆全部 49 欄，可選值或「留空＝依設定補齊」；儲存後重算缺格與卡片顯示"""
+        p = self._imported_profiles[idx]
+        blanks = set(p.get("_blanks", []))
+        t = THEMES.get(self.theme_var.get(), THEMES[DEFAULT_THEME])
+        dlg = tk.Toplevel(self.root)
+        dlg.title(f"✎ 編輯第 {idx+1} 筆")
+        dlg.configure(bg=t["bg"])
+        dlg.transient(self.root); dlg.grab_set()
+        W, H = 760, 720
+        dlg.update_idletasks()
+        x = self.root.winfo_x() + max(0, (self.root.winfo_width() - W) // 2)
+        y = self.root.winfo_y() + max(0, (self.root.winfo_height() - H) // 2)
+        dlg.geometry(f"{W}x{H}+{x}+{y}")
+        tk.Label(dlg, text=f"✎ 編輯第 {idx+1} 筆", bg=t["bg"], fg=t["accent"],
+                 font=("微軟正黑體", 15, "bold")).pack(pady=(14, 2))
+        tk.Label(dlg, text="選「（留空＝依設定補齊）」表示執行時依下方卡片比例填入；風險題留空且未開啟風險題補齊時維持「否」",
+                 bg=t["bg"], fg="#7d8696", font=("微軟正黑體", 9)).pack(pady=(0, 6))
+        # 可捲動表單
+        outer = ttk.Frame(dlg); outer.pack(fill="both", expand=True, padx=14, pady=4)
+        cv = tk.Canvas(outer, highlightthickness=0, bd=0, bg=t["bg"])
+        sb = ttk.Scrollbar(outer, orient="vertical", command=cv.yview)
+        cv.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y"); cv.pack(side="left", fill="both", expand=True)
+        form = ttk.Frame(cv)
+        win = cv.create_window((0, 0), window=form, anchor="nw")
+        form.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
+        cv.bind("<Configure>", lambda e: cv.itemconfigure(win, width=e.width))
+        def _wheel(e):
+            try: cv.yview_scroll(int(-e.delta / 120), "units")
+            except Exception: pass
+        dlg.bind("<MouseWheel>", _wheel)
+        vars_ = {}
+        last_page = None
+        for k, label, dv, allowed in COMPLETE_FIELDS:
+            page = label.split(" ")[0][:2]   # P1 / P2 ... / P7
+            if page != last_page:
+                ttk.Label(form, text={"P1": "一、風險評估 P1", "P2": "P2 性病史", "P3": "P3 藥物史",
+                                      "P4": "P4 性接觸場合", "P5": "P5 PEP/PrEP",
+                                      "P6": "二、基本資料 P6", "P7": "三、篩檢習慣 P7"}.get(page, page),
+                          font=("微軟正黑體", 11, "bold"), foreground=t["accent"]).pack(anchor="w", pady=(10, 2))
+                last_page = page
+            row = ttk.Frame(form); row.pack(fill="x", pady=1)
+            ttk.Label(row, text=label, width=30, anchor="w").pack(side="left")
+            cur = "" if k in blanks else p.get(k, "")
+            if allowed:
+                v = tk.StringVar(value=(self._BLANK_CHOICE if k in blanks else str(cur)))
+                cb = ttk.Combobox(row, textvariable=v, values=[self._BLANK_CHOICE] + list(allowed),
+                                  state="readonly", width=26)
+                cb.pack(side="left", padx=4)
+                cb.bind("<MouseWheel>", lambda e: "break")   # 滾輪不換值
+            else:
+                v = tk.StringVar(value="" if cur is None else str(cur))
+                ttk.Entry(row, textvariable=v, width=28).pack(side="left", padx=4)
+                hint = {"year": "西元 4 碼；留空＝依區間隨機", "last_screen_ym": "如 2026/3；留空＝隨機最近月份",
+                        "q7_amph_method": "吸入,注射,口服（逗號分隔）"}.get(k, "留空即不填")
+                ttk.Label(row, text=hint, foreground="#9e9e9e", font=("微軟正黑體", 9)).pack(side="left")
+            vars_[k] = v
+
+        def save():
+            new_blanks = set()
+            for k, label, dv, allowed in COMPLETE_FIELDS:
+                s = vars_[k].get().strip()
+                if allowed:
+                    if s == self._BLANK_CHOICE or s == "":
+                        p[k] = dv; new_blanks.add(k)
+                    else:
+                        p[k] = s
+                elif k == "year":
+                    yv = _normalize_birth_year(s)
+                    if s and yv is None:
+                        messagebox.showerror("出生年格式錯", f"「{s}」不是有效年份", parent=dlg); return
+                    if yv is None:
+                        p[k] = 1990; new_blanks.add(k)
+                    else:
+                        p[k] = yv
+                elif k == "last_screen_ym":
+                    ym = _normalize_ym(s)
+                    if s and not ym:
+                        messagebox.showerror("年月格式錯", f"「{s}」請用 2026/3 這種格式", parent=dlg); return
+                    if ym:
+                        p[k] = ym
+                    else:
+                        p[k] = ""; new_blanks.add(k)
+                else:
+                    p[k] = s
+                    if not s:
+                        new_blanks.add(k)
+            p["_blanks"] = sorted(new_blanks)
+            self._recount_blanks()
+            self._refresh_preview_tree()
+            self._render_blank_summary()
+            self._apply_card_visibility()
+            self._update_counts()
+            self.log(f"✎ 第 {idx+1} 筆已修改（留空 {len(new_blanks)} 欄依設定補齊）")
+            dlg.destroy()
+
+        btns = ttk.Frame(dlg); btns.pack(pady=10)
+        tk.Button(btns, text="💾 儲存", command=save, font=("微軟正黑體", 12, "bold"),
+                  bg=t["accent"], fg="#ffffff", relief="flat", padx=18, pady=6, cursor="hand2").pack(side="left", padx=8)
+        tk.Button(btns, text="取消", command=dlg.destroy, font=("微軟正黑體", 11),
+                  relief="flat", padx=14, pady=6, cursor="hand2").pack(side="left", padx=8)
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
 
     def _refresh_preview_tree(self):
         """v1.0.23：把匯入的 profiles 顯示在預覽 Treeview"""
@@ -4160,6 +4563,9 @@ class App:
             style.configure(".", background=t["bg"], foreground=t["fg"])
             style.configure("TFrame", background=t["bg"])
             style.configure("TLabel", background=t["bg"], foreground=t["fg"])
+            # v1.3.3 大勾選框（完成後自動開啟 Excel）— 必須在 theme_use 之後設，否則切主題會被重設
+            style.configure("Big.TCheckbutton", background=t["bg"], foreground=t["accent"],
+                            font=("微軟正黑體", 12, "bold"), padding=(8, 4))
             style.configure("TLabelframe", background=t["bg"], foreground=t["accent"], borderwidth=1)
             style.configure("TLabelframe.Label", background=t["bg"], foreground=t["accent"],
                            font=("微軟正黑體", 10, "bold"))
@@ -4292,8 +4698,11 @@ class App:
                 try: ws.append(pv.get())
                 except Exception: ws.append(0)
             return opts, ws
-        block = {"gender": self.gender_pcts, "nation": self.nation_pcts, "edu": self.edu_pcts,
-                 "orient": self.orient_pcts, "testing_habit": self.testing_pcts}[key]
+        if key in getattr(self, "_risk_pcts", {}):      # v1.3.3 風險題卡片
+            block = self._risk_pcts[key]
+        else:
+            block = {"gender": self.gender_pcts, "nation": self.nation_pcts, "edu": self.edu_pcts,
+                     "orient": self.orient_pcts, "testing_habit": self.testing_pcts}[key]
         opts, ws = [], []
         for op, v, _ in block:
             opts.append(op)
@@ -4344,6 +4753,20 @@ class App:
                 for i, q in enumerate(pool):
                     if q.get("testing_habit") == "是" and not q.get("last_screen_ym"):
                         q["last_screen_ym"] = _random_recent_ym()
+                # v1.3.3 風險題依卡片補齊：主題先填；子題只填「上層抽到是」的那幾筆（其餘維持預設）
+                if getattr(self, "risk_mode_var", None) and self.risk_mode_var.get() == "custom":
+                    for key, _t, pkey, _o, _d in RISK_CARD_DEFS:
+                        idxs = [i for i, b in enumerate(blanks_per)
+                                if key in b and (pkey is None or pool[i].get(pkey) == RISK_TRIGGER_VALUE)]
+                        if not idxs:
+                            continue
+                        vals = self._demo_values(key, len(idxs))
+                        for i, v in zip(idxs, vals):
+                            if v is not None:
+                                pool[i][key] = v
+                    n_yes = sum(1 for q in pool if any(q.get(k) == "是" for k in ("q1_sex", "q6_std", "q7_drug_use")))
+                    if n_yes:
+                        self.log(f"  ⚠ 風險題依卡片補齊：{n_yes} 筆主題抽到「是」，衍生子題已連帶填入")
             return pool
         else:
             return self._build_profile_pool()
@@ -4392,6 +4815,11 @@ class App:
                 return
         if _need("res18") and not self._validate_city_rows(self.res18_rows, "18歲前居住地"): return
         if _need("resCur") and not self._validate_city_rows(self.resCur_rows, "現居住地"): return
+        # v1.3.3 風險題卡片：只驗「顯示中」的
+        if complete:
+            for key, title, _p, _o, _d in RISK_CARD_DEFS:
+                if self._risk_card_shown(key, bc) and not self._validate_pcts(self._risk_pcts[key], title):
+                    return
         if not complete and self.total_var.get() < 1:
             messagebox.showerror("錯誤", "總筆數至少 1")
             return
@@ -4523,6 +4951,10 @@ class App:
             "resCur":  [(cv.get(), pv.get()) for cv, pv, _ in self.resCur_rows],
             "fill_blank_random": self.fill_blank_random_var.get(),  # v1.2.2
             "seq_modes": {k: v.get() for k, v in getattr(self, "seq_mode_vars", {}).items()},  # v1.3.1
+            # v1.3.3 風險題補齊
+            "risk_mode": getattr(self, "risk_mode_var", None).get() if hasattr(self, "risk_mode_var") else "no",
+            "risk_pcts": {k: [(op, v.get()) for op, v, _ in blk]
+                          for k, blk in getattr(self, "_risk_pcts", {}).items()},
         }
         return d
 
@@ -4574,6 +5006,17 @@ class App:
             for k, m in (d.get("seq_modes") or {}).items():
                 if k in getattr(self, "seq_mode_vars", {}) and m in ("random", "seq"):
                     self.seq_mode_vars[k].set(m)
+            # v1.3.3 風險題補齊
+            if d.get("risk_mode") in ("no", "custom") and hasattr(self, "risk_mode_var"):
+                self.risk_mode_var.set(d["risk_mode"])
+            for k, saved in (d.get("risk_pcts") or {}).items():
+                blk = getattr(self, "_risk_pcts", {}).get(k)
+                if blk and saved:
+                    m = dict(saved)
+                    for op, v, _ in blk:
+                        if op in m:
+                            try: v.set(int(m[op]))
+                            except Exception: pass
             if "speed_preset" in d: self.speed_preset.set(d["speed_preset"])
             for k_ui, k_dict in [
                 ("dly_act_lo","dly_act_lo"), ("dly_act_hi","dly_act_hi"),
