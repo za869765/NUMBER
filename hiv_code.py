@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -1300,6 +1300,7 @@ class HivaWorker:
         from selenium.webdriver.support import expected_conditions as EC
         d = self.driver
         wait = WebDriverWait(d, self.dly.wait_timeout)
+        self._cur_profile = profile   # v1.3.2 給「反紅即時改正」查該筆答案用
 
         # 1) 首頁 → 點「進入風險評估」
         d.get(URL_HOME)
@@ -1476,7 +1477,9 @@ class HivaWorker:
                                         edu_map.get(profile["edu"], "3")):
             save_debug_snapshot(d, "p6_edu_fail"); return None
         self.dly.action()
-        if not self._click_next(expect_progress=90):
+        # v1.3.2：換頁失敗時網站會把完成度提前改成 90% 但人還在第六頁，必須看到第七頁的篩檢習慣題才算成功
+        if not self._click_next(expect_progress=90,
+                                expect_element_id="ctl00_MainContent_QuestWizard_rdlRegularScreening_0"):
             self._dismiss_alert_if_any(); save_debug_snapshot(d, "p6_to_p7_fail"); return None
         self.dly.page()
 
@@ -1575,6 +1578,136 @@ class HivaWorker:
             self.log(f"✗ 找不到下一步按鈕：{e}")
             return False
 
+    # ── v1.3.2 反紅即時改正 ──
+    # hiva checkForm()：漏答的題目把「題目列」<tr> 加 class=lightLine（radio 在下一個 <tr>），
+    # 伺服器端驗證（如 LastTimeScreening）則把 input 本身染 #CC0000，並跳自訂彈窗「請於反紅處填入您的答案！」
+    _RED_GROUP_TO_KEY = {
+        "心理性別": "gender", "國籍": "nation", "性傾向": "orient", "教育程度": "edu",
+        "rdlRegularScreening": "testing_habit",
+        "rblHasSex": "q1_sex", "rdlAnalSexUseCondoms": "q2_condom", "rblSexFix": "q3_regular",
+        "rdlWithWine": "q4_alcohol", "rdlWithDrug": "q5_drug", "rdlAnsHaveSTD": "q6_std",
+        "成癮藥物": "q7_drug_use",
+        "網交": "q8a_online", "娛樂場所": "q8b_venue", "性服務": "q8c_sex_worker", "性消費": "q8d_sex_consumer",
+        "HIV感染者": "q9_partner_hiv", "預防性投藥": "q10_pep_used", "PEP想服用": "q11_pep_want",
+        "聽過PrEP": "q12_prep_heard", "PrEP想服用": "q13_prep_want",
+    }
+    _RED_MODAL_XP = "//*[contains(text(),'反紅處') or contains(text(),'Not valid')]"
+
+    def _red_modal_present(self):
+        from selenium.webdriver.common.by import By
+        try:
+            for el in self.driver.find_elements(By.XPATH, self._RED_MODAL_XP):
+                if el.is_displayed():
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _profile_value_for(self, key):
+        """該筆資料的答案（簡易 profile 的 testing → testing_habit；缺值用 COMPLETE_FIELDS 預設）"""
+        p = getattr(self, "_cur_profile", None) or {}
+        if key == "testing_habit" and "testing_habit" not in p and "testing" in p:
+            return p["testing"]
+        v = p.get(key)
+        if v is None or v == "":
+            for k, _, dv, _ in COMPLETE_FIELDS:
+                if k == key:
+                    return dv
+        return v
+
+    def _fix_red_fields(self):
+        """按掉彈窗 → 找反紅的題目 → 依該筆答案補填。回補填的題目數（0=沒東西可補）。"""
+        from selenium.webdriver.common.by import By
+        d = self.driver
+        prefix = "ctl00$MainContent$QuestWizard$"
+        # 1) 先掃反紅控件（要在關彈窗之前：按 OK 後頁面會重畫，紅色標記就消失了）
+        #    真站實測（2026-09-08）：伺服器端驗證是把整個 RadioButtonList <table> 或 <input> 染
+        #    style="background-color:#CC0000"，沒有 lightLine class；客戶端 checkForm 才用 lightLine
+        #    只記 (tag, type, name, id) 字串，之後依 name/id 重新定位，避免 stale element
+        targets = []
+        try:
+            red_xp = ("//*[contains(@style,'CC0000') or contains(@style,'cc0000') "
+                      "or contains(@class,'lightLine')]")
+            raw = []
+            for el in d.find_elements(By.XPATH, red_xp):
+                tag = el.tag_name.lower()
+                if tag in ("input", "select"):
+                    raw.append(el)
+                    continue
+                raw.extend(el.find_elements(By.XPATH, ".//input | .//select"))
+                if "lightLine" in (el.get_attribute("class") or ""):
+                    raw.extend(el.find_elements(By.XPATH,
+                        "following-sibling::tr[1]//input | following-sibling::tr[1]//select"))
+            for el in raw:
+                try:
+                    targets.append((el.tag_name.lower(), (el.get_attribute("type") or "").lower(),
+                                    el.get_attribute("name") or "", el.get_attribute("id") or ""))
+                except Exception:
+                    continue
+        except Exception as e:
+            self.log(f"  ⚠ 掃描反紅欄位失敗：{e}")
+        # 2) 關彈窗（SweetAlert / 自訂 modal 的 OK / 確定，或 JS alert）
+        closed = self._dismiss_alert_if_any()
+        if not closed:
+            try:
+                for b in d.find_elements(By.XPATH,
+                        self._RED_MODAL_XP + "/following::*[self::button or self::a or self::input]"
+                        "[contains(.,'OK') or contains(.,'確定') or contains(@value,'OK') or contains(@value,'確定')]"):
+                    if b.is_displayed():
+                        b.click(); closed = True; break
+            except Exception:
+                pass
+        time.sleep(0.4)
+        # 3) 依該筆答案補填
+        seen_groups, fixed = set(), 0
+        for tag, typ, name, eid in targets:
+            if tag == "input" and typ == "radio":
+                if name in seen_groups:
+                    continue
+                seen_groups.add(name)
+                group = name[len(prefix):] if name.startswith(prefix) else name
+                key = self._RED_GROUP_TO_KEY.get(group)
+                val = self._profile_value_for(key) if key else None
+                rv = self._option_value(key, val) if key else None
+                if rv is None:
+                    rv = "2"   # 不認識的題目：預設「否」
+                    try:
+                        if not d.find_elements(By.XPATH, f"//input[@type='radio' and @name=\"{name}\" and @value='2']"):
+                            rv = d.find_element(By.XPATH, f"//input[@type='radio' and @name=\"{name}\"]").get_attribute("value")
+                    except Exception:
+                        pass
+                label = OUTPUT_LABELS.get(key, group)
+                if group == "rdlRegularScreening":
+                    ok = self._set_p7_habit(rv, retries=0)
+                else:
+                    ok = self._set_radio_for_group(name, rv)
+                self.log(f"  ↻ 反紅補填：{label} → {val if val is not None else rv}{'' if ok else '（失敗）'}")
+                if ok: fixed += 1
+                self.dly.action()
+            elif tag == "input" and typ in ("text", ""):
+                if "LastTimeScreening" in name:
+                    ym = _normalize_ym(self._profile_value_for("last_screen_ym")) or _random_recent_ym()
+                    ok = self._set_input_value_js(name, ym)
+                    if ok and isinstance(getattr(self, "_cur_profile", None), dict):
+                        self._cur_profile["last_screen_ym"] = ym
+                    self.log(f"  ↻ 反紅補填：最近篩檢年月 → {ym}{'' if ok else '（失敗）'}")
+                    if ok: fixed += 1
+            elif tag == "select":
+                key = {"BirthYear": "year", "DDL_Live_18_ago": "res18", "居住地": "resCur"}.get(
+                    next((k for k in ("BirthYear", "DDL_Live_18_ago", "居住地") if eid.endswith(k)), ""), None)
+                if key and eid:
+                    val = self._profile_value_for(key)
+                    ok = self._select_by_id(eid, str(val))
+                    self.log(f"  ↻ 反紅補填：{OUTPUT_LABELS.get(key, key)} → {val}{'' if ok else '（失敗）'}")
+                    if ok:
+                        fixed += 1
+                        if key == "year":
+                            self._wait_for_enabled("ctl00_MainContent_QuestWizard_DDL_Live_18_ago")
+                    self.dly.action()
+        if closed and fixed == 0:
+            self.log("  ⚠ 有反紅彈窗但找不到可補的欄位")
+        return fixed
+
     def _click_next(self, expect_progress=None, expect_element_id=None,
                     timeout=None, recovery_fn=None, max_retries=2):
         """v1.0.13：雙錨點等待 — 完成度% AND 目標元素 ID 都要到位才算換頁成功。
@@ -1589,6 +1722,12 @@ class HivaWorker:
         for attempt in range(max_retries + 1):
             if not self._click_next_btn():
                 return False
+            # v1.3.2 反紅即時改正：一按下一步就先看有沒有「請於反紅處填入」彈窗，有就補填後重按
+            time.sleep(0.4)
+            if self._red_modal_present():
+                self.log(f"⚠ 換頁被擋：有題目反紅（第 {attempt+1} 次），即時補填…")
+                self._fix_red_fields()
+                continue
             ok = True
             if expect_progress is not None:
                 ok = self._wait_for_progress(expect_progress, timeout=to)
@@ -1606,7 +1745,10 @@ class HivaWorker:
                 return True
             # ── 失敗：偵測+關閉彈窗、補填、重試 ──
             self.log(f"⚠ 換頁失敗（第 {attempt+1} 次），啟動恢復…")
-            self._dismiss_alert_if_any()
+            if self._red_modal_present():
+                self._fix_red_fields()      # v1.3.2 先補反紅
+            else:
+                self._dismiss_alert_if_any()
             time.sleep(0.5)
             if recovery_fn:
                 try:
@@ -1641,14 +1783,36 @@ class HivaWorker:
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
         d = self.driver
-        try:
-            btn = WebDriverWait(d, 15).until(EC.element_to_be_clickable(
-                (By.XPATH, "//*[(self::button or self::a or self::input) and (contains(.,'完成') or @value='完成')]")))
-            btn.click()
-            return True
-        except Exception as e:
-            self.log(f"✗ 完成失敗：{e}")
-            return False
+        for attempt in range(3):
+            try:
+                btn = WebDriverWait(d, 15).until(EC.element_to_be_clickable(
+                    (By.XPATH, "//*[(self::button or self::a or self::input) and (contains(.,'完成') or @value='完成')]")))
+                btn.click()
+            except Exception as e:
+                self.log(f"✗ 完成失敗：{e}")
+                return False
+            # v1.3.2 反紅即時改正：完成被擋（客戶端 checkForm 立即彈、伺服器端必填則整頁重載後彈）
+            #         → 最多等 8 秒看「到結果頁」或「反紅彈窗」哪個先來；都沒來交給後面的結果頁等待
+            blocked = False
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                try:
+                    if "HAANeedScreeningMessage" in (d.current_url or "") or \
+                       "諮詢代碼為" in d.find_element(By.TAG_NAME, "body").text:
+                        return True
+                except Exception:
+                    pass
+                if self._red_modal_present():
+                    blocked = True
+                    break
+                time.sleep(0.3)
+            if not blocked:
+                return True
+            self.log(f"⚠ 完成被擋：有題目反紅（第 {attempt+1} 次），即時補填…")
+            if self._fix_red_fields() == 0 and attempt >= 1:
+                return False
+            self.dly.action()
+        return False
 
     # ── v1.0.22 完整模式輔助：依 profile 設定每個 radio group ──
     @staticmethod
@@ -1684,14 +1848,9 @@ class HivaWorker:
     def _set_radio_for_group(self, name, value):
         """指定 group name + value 點選 radio"""
         from selenium.webdriver.common.by import By
-        d = self.driver
         try:
-            target = d.find_element(By.XPATH,
+            return self._click_radio_verified(
                 f"//input[@type='radio' and @name=\"{name}\" and @value=\"{value}\"]")
-            d.execute_script("arguments[0].scrollIntoView({block:'center'});", target)
-            try: target.click()
-            except Exception: d.execute_script("arguments[0].click();", target)
-            return True
         except Exception:
             return False
 
@@ -1850,8 +2009,8 @@ class HivaWorker:
         # 自訂 Modal（含 SweetAlert / Bootstrap modal）
         from selenium.webdriver.common.by import By
         for xp in [
-            "//div[contains(@class,'swal') or contains(@class,'modal')]"
-            "//button[contains(.,'確定') or contains(.,'OK') or contains(.,'關閉')]",
+            "//div[contains(@class,'swal') or contains(@class,'sweet-alert') or contains(@class,'modal')]"
+            "//button[contains(.,'確定') or contains(.,'OK') or contains(.,'關閉') or contains(@class,'confirm')]",
         ]:
             try:
                 btn = d.find_element(By.XPATH, xp)
@@ -1904,17 +2063,39 @@ class HivaWorker:
             self.log(f"✗ 找不到下拉 id={elem_id}：{e}")
             return False
 
-    def _set_radio_by_name(self, name_attr, value):
-        """以 name 屬性 + value 直接設定該題的 radio"""
+    def _click_radio_verified(self, xp):
+        """v1.3.2：點 radio 後必驗 is_selected；沒勾上改 JS click 再驗（重新定位，避免 stale）。
+           回 True=確定已勾選。"""
         from selenium.webdriver.common.by import By
         d = self.driver
+        el = d.find_element(By.XPATH, xp)          # 找不到讓例外往外拋，呼叫端記 log
+        d.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+        try: el.click()
+        except Exception: pass
+        for _ in range(2):
+            try:
+                if d.find_element(By.XPATH, xp).is_selected():
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.15)
+            try:
+                d.execute_script("arguments[0].click();", d.find_element(By.XPATH, xp))
+            except Exception:
+                pass
+        try:
+            return d.find_element(By.XPATH, xp).is_selected()
+        except Exception:
+            return False
+
+    def _set_radio_by_name(self, name_attr, value):
+        """以 name 屬性 + value 直接設定該題的 radio（v1.3.2：點完必驗證真的勾上）"""
         try:
             xp = f"//input[@type='radio' and @name=\"{name_attr}\" and @value=\"{value}\"]"
-            el = d.find_element(By.XPATH, xp)
-            d.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-            try: el.click()
-            except Exception: d.execute_script("arguments[0].click();", el)
-            return True
+            if self._click_radio_verified(xp):
+                return True
+            self.log(f"✗ radio name={name_attr} value={value} 點了但沒勾上")
+            return False
         except Exception as e:
             self.log(f"✗ radio name={name_attr} value={value} 點選失敗：{e}")
             return False
@@ -2160,9 +2341,29 @@ class App:
         # v1.0.26：分頁切換時更新底部按鈕標籤
         self.notebook.bind("<<NotebookTabChanged>>", lambda e: self._update_start_btn_label())
 
-        tab_batch  = ttk.Frame(self.notebook)
+        # v1.3.2：批次分頁改成可上下捲動（Canvas + 內框），完整模式卡片再多也不會把底部按鈕/執行紀錄擠出畫面
+        tab_batch_outer = ttk.Frame(self.notebook)
+        _t0 = THEMES.get(self.theme_var.get(), THEMES[DEFAULT_THEME])
+        _bc = tk.Canvas(tab_batch_outer, highlightthickness=0, bd=0, bg=_t0.get("bg", "#f5f7fa"))
+        _bsb = ttk.Scrollbar(tab_batch_outer, orient="vertical", command=_bc.yview)
+        _bc.configure(yscrollcommand=_bsb.set)
+        _bsb.pack(side="right", fill="y")
+        _bc.pack(side="left", fill="both", expand=True)
+        tab_batch = ttk.Frame(_bc)
+        _bwin = _bc.create_window((0, 0), window=tab_batch, anchor="nw")
+        tab_batch.bind("<Configure>", lambda e, c=_bc: c.configure(scrollregion=c.bbox("all")))
+        _bc.bind("<Configure>", lambda e, c=_bc, w=_bwin: c.itemconfigure(w, width=e.width))
+        def _batch_wheel(e, c=_bc):
+            try:
+                if c.bbox("all") and c.bbox("all")[3] > c.winfo_height():
+                    c.yview_scroll(int(-e.delta / 120), "units")
+            except Exception:
+                pass
+        _bc.bind("<Enter>", lambda e, c=_bc: c.bind_all("<MouseWheel>", _batch_wheel))
+        _bc.bind("<Leave>", lambda e, c=_bc: c.unbind_all("<MouseWheel>"))
+        self._batch_canvas = _bc
         tab_single = ttk.Frame(self.notebook)
-        self.notebook.add(tab_batch,  text="📊 批次取號")
+        self.notebook.add(tab_batch_outer, text="📊 批次取號")
         self.notebook.add(tab_single, text="🎯 單筆取號")
 
         # ── v1.0.21 模式切換列（批次分頁最頂） ──
@@ -2420,7 +2621,7 @@ class App:
 
         log_fr = ttk.LabelFrame(self.root, text="執行紀錄（綠=成功 / 黃=注意 / 紅=錯誤）")
         log_fr.pack(fill="both", expand=True, padx=6, pady=6)
-        self.log_box = tk.Text(log_fr, height=15, font=("Consolas", 10), bg="#1e1e1e", fg="#dcdcdc",
+        self.log_box = tk.Text(log_fr, height=6,   # v1.3.2 15→6 行：底部固定後讓分頁區保留空間（全展開可看完整） font=("Consolas", 10), bg="#1e1e1e", fg="#dcdcdc",
                                insertbackground="#dcdcdc")
         self.log_box.pack(fill="both", expand=True, padx=4, pady=(4, 0))
         # log 著色 tag
@@ -2442,6 +2643,18 @@ class App:
         # ── v1.0.45 免責聲明 / v1.0.51 兩欄：左版本、右免責聲明（拿掉 build 日期）──
         disclaimer_fr = ttk.Frame(self.root)
         disclaimer_fr.pack(fill="x", padx=14, pady=(0, 6))
+
+        # v1.3.2：底部五區（按鈕/進度/統計/執行紀錄/免責）改成 side=bottom 且排在 notebook 之前，
+        #         視窗高度不夠時先壓縮 notebook（分頁內容可捲動），執行紀錄與按鈕永遠看得到
+        for _w, _kw in [
+            (disclaimer_fr, dict(fill="x", padx=14, pady=(0, 6))),
+            (log_fr,        dict(fill="x", expand=False, padx=6, pady=6)),   # 固定 6 行高，不吃額外空間
+            (stat_fr,       dict(fill="x", padx=6, pady=(0, 4))),
+            (prog_fr,       dict(fill="x", padx=6, pady=2)),
+            (btn_fr,        dict(fill="x", padx=6, pady=8)),
+        ]:
+            _w.pack_forget()
+            _w.pack(side="bottom", before=self.notebook, **_kw)
         ttk.Label(disclaimer_fr,
                   text=f"v{VERSION}",
                   foreground="#9e9e9e",
@@ -3260,6 +3473,13 @@ class App:
                 ws = wb.active
                 ws.title = today_sheet
             wb.active = 0
+            # v1.3.2：只讓今天分頁維持「已選取」；否則舊 active 分頁的 tabSelected 殘留 → Excel 以「資料組」
+            #         （多工作表群組）開啟，使用者無法複製貼上
+            for _ws in wb.worksheets:
+                try:
+                    _ws.sheet_view.tabSelected = (_ws is ws)
+                except Exception:
+                    pass
             ws.append(OUTPUT_HEADERS)
             # 收集每筆內容（既存 + 新）並依路徑分流
             all_rows = []           # [(content, path)]
@@ -3915,6 +4135,8 @@ class App:
         t = THEMES.get(name, THEMES[DEFAULT_THEME])
         try:
             self.root.configure(bg=t["bg"])
+            try: self._batch_canvas.configure(bg=t["bg"])   # v1.3.2 批次分頁捲動底色
+            except Exception: pass
             style = ttk.Style()
             try: style.theme_use("clam")
             except Exception: pass
