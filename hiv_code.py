@@ -18,7 +18,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 DEBUG = False  # v1.0.38：正式版預設關閉，失敗時 HTML 快照不再自動存
 
 # v1.0.39 雲端授權服務（Cloudflare Worker URL）
@@ -255,6 +255,7 @@ COMPLETE_FIELDS = [
     ("edu",            "P6 教育程度",             "高中職",  EDUS),
     # P7
     ("testing_habit",  "P7Q1 篩檢習慣",           "否",     ["是", "否", "從未做過"]),
+    ("last_screen_ym", "P7Q2 最近篩檢年月(篩檢習慣=是時必填)", "", None),  # v1.3.1 hiva 新題，格式 2026/3
     ("phone",          "P7 手機號碼(選填)",       "",       None),
     ("email",          "P7 E-mail(選填)",         "",       None),
     ("other_contact",  "P7 其他聯絡(選填)",       "",       None),
@@ -285,7 +286,8 @@ OUTPUT_LABELS = {
     "gender": "性別", "nation": "國籍", "year": "出生年",
     "res18": "18歲前居住地", "resCur": "現居住地",
     "orient": "性傾向", "edu": "教育程度",
-    "testing_habit": "篩檢習慣", "phone": "手機", "email": "E-mail",
+    "testing_habit": "篩檢習慣", "last_screen_ym": "最近篩檢年月",
+    "phone": "手機", "email": "E-mail",
     "other_contact": "其他聯絡",
 }
 # v1.0.35：摘要欄（B方案）
@@ -367,6 +369,12 @@ def make_sample_xlsx(path):
         desc_row[_yi] = "打末2碼自動顯示西元（3→2003、93→1993）；打4碼亦可"
     except ValueError:
         pass
+    # v1.3.1 最近篩檢年月：篩檢習慣=是 才需要
+    try:
+        _mi = [k for k, _, _, _ in COMPLETE_FIELDS].index("last_screen_ym")
+        desc_row[_mi] = "篩檢習慣=是時填，如 2026/3；空白＝執行時隨機最近1~12個月"
+    except ValueError:
+        pass
     default_row = [dv for _, _, dv, _ in COMPLETE_FIELDS]
 
     # Layout：
@@ -424,6 +432,12 @@ def make_sample_xlsx(path):
         ws.column_dimensions[_ycol].number_format = f'[>=100]0;[>{_cur2}]"19"00;"20"00'
     except Exception:
         pass
+    # v1.3.1 最近篩檢年月欄設文字格式，打 2026/3 不被 Excel 轉成日期（轉了也能匯入）
+    try:
+        _mi2 = [k for k, _, _, _ in COMPLETE_FIELDS].index("last_screen_ym")
+        ws.column_dimensions[ws.cell(1, _mi2 + 1).column_letter].number_format = "@"
+    except Exception:
+        pass
     ws.row_dimensions[1].height = 32
     ws.row_dimensions[2].height = 28
     ws.row_dimensions[3].height = 18
@@ -465,6 +479,8 @@ REQUIRED_KEYS_FOR_WARN = {
     # 一定要填（沒填要警示）
     "gender", "nation", "year", "res18", "resCur", "orient", "edu", "testing_habit",
 }
+# v1.2.2/v1.3.1 完整模式空格可依比例卡片補齊的 8 個基本欄位（順序＝面板顯示順序）
+DEMO_FILL_KEYS = ("gender", "nation", "year", "res18", "resCur", "orient", "edu", "testing_habit")
 
 # v1.2.2 性別欄容許用 1/2/3/4 代碼（或「1男」之類）對應回 男/女/跨性別/其他
 GENDER_CODE_MAP = {"1": "男", "2": "女", "3": "跨性別", "4": "其他"}
@@ -501,6 +517,68 @@ def _normalize_birth_year(v):
         return cand
     return n                            # 3 碼以上照原值（4 碼正常西元年）
 
+
+# v1.3.1 最近篩檢年月（hiva 第七頁 Q2，篩檢習慣=是 時伺服器端必填）
+#   hiva 月曆元件輸出格式 'YYYY/M'（例 2026/3）；匯入容許 2026/3、2026-03、2026.3、202603、2026年3月、
+#   以及 Excel 自動轉成的日期值。回 'YYYY/M'；空白回 None；格式錯回 ""（呼叫端列為無效值）
+def _normalize_ym(v):
+    if v is None:
+        return None
+    if isinstance(v, (datetime.datetime, datetime.date)):
+        return f"{v.year}/{v.month}"
+    s = str(v).strip()
+    if not s:
+        return None
+    digits = "".join(ch if ch.isdigit() else " " for ch in s).split()
+    if len(digits) >= 2:
+        y, m = digits[0], digits[1]
+    elif len(digits) == 1 and len(digits[0]) in (5, 6):   # 202603 / 20263
+        y, m = digits[0][:4], digits[0][4:]
+    else:
+        return ""
+    try:
+        y, m = int(y), int(m)
+    except ValueError:
+        return ""
+    cur = datetime.datetime.now().year
+    if not (1980 <= y <= cur and 1 <= m <= 12):
+        return ""
+    return f"{y}/{m}"
+
+
+def _random_recent_ym(lo=1, hi=12):
+    """隨機取最近 lo~hi 個月前的年月（不含當月），格式 'YYYY/M'"""
+    now = datetime.datetime.now()
+    back = random.randint(lo, hi)
+    y, m = now.year, now.month - back
+    while m <= 0:
+        m += 12; y -= 1
+    return f"{y}/{m}"
+
+
+def allocate_sequence(items, weights, total):
+    """v1.3.1「依序」分配：依比例算各選項筆數（最大餘數法、同分依選項順序），
+       展開成 [A]*nA + [B]*nB + ... 長度=total 的列表（先填滿第一項再換下一項）。
+       權重總和不必為 100；全 0 或空 → 全部給第一項。"""
+    total = max(0, int(total))
+    if not items or total == 0:
+        return []
+    ws = [max(0, float(w or 0)) for w in weights]
+    wsum = sum(ws)
+    if wsum <= 0:
+        return [items[0]] * total
+    raw = [total * w / wsum for w in ws]
+    base = [int(x) for x in raw]
+    rem = total - sum(base)
+    order = sorted(range(len(items)), key=lambda i: (-(raw[i] - base[i]), i))
+    for i in order[:rem]:
+        base[i] += 1
+    seq = []
+    for it, n in zip(items, base):
+        seq.extend([it] * n)
+    return seq
+
+
 def import_xlsx_profiles(path):
     """v1.0.31/33：讀取 xlsx
        回 (profiles, warnings_dict)
@@ -520,6 +598,7 @@ def import_xlsx_profiles(path):
     profiles = []
     blanks_by_row = []   # [(row_idx, [field_labels])]
     invalids = []        # [(row_idx, field_label, bad_value, default)]
+    blank_counts = {}    # v1.3.1 每個基本欄位的空格筆數（給「空格補齊面板」用）
     # 自動跳過輔助列
     start = 1
     if len(rows) >= 2:
@@ -555,7 +634,21 @@ def import_xlsx_profiles(path):
                 if k in REQUIRED_KEYS_FOR_WARN:
                     label = OUTPUT_LABELS.get(k, k)
                     row_blanks.append(label)
+                # v1.3.1 條件式必填：篩檢習慣=是 但最近篩檢年月空白 → 明確警示（執行時會隨機補）
+                elif k == "last_screen_ym" and prof.get("testing_habit") == "是":
+                    row_blanks.append("最近篩檢年月(篩檢習慣=是，執行時隨機補最近月份)")
+                    blank_counts["last_screen_ym"] = blank_counts.get("last_screen_ym", 0) + 1
                 prof[k] = dv
+            elif k == "last_screen_ym":   # v1.3.1 正規化成 hiva 的 'YYYY/M'
+                ym = _normalize_ym(actual)
+                if not ym:
+                    invalids.append((ridx, OUTPUT_LABELS.get(k, k), str(actual).strip(), "（執行時隨機補）"))
+                    blank_keys.append(k)
+                    if prof.get("testing_habit") == "是":
+                        blank_counts["last_screen_ym"] = blank_counts.get("last_screen_ym", 0) + 1
+                    prof[k] = ""
+                else:
+                    prof[k] = ym
             elif allowed:
                 v = str(actual).strip()
                 if k == "gender":   # v1.2.2 容許 1/2/3/4 代碼或「1男」
@@ -569,12 +662,15 @@ def import_xlsx_profiles(path):
             else:
                 prof[k] = actual
         prof["_blanks"] = blank_keys   # v1.2.2 內部標記（執行前 _build_pool_for_mode 會清掉）
+        for k in blank_keys:
+            if k in DEMO_FILL_KEYS:
+                blank_counts[k] = blank_counts.get(k, 0) + 1
         if row_blanks:
             blanks_by_row.append((ridx, row_blanks))
         _y = _normalize_birth_year(prof.get("year"))   # v1.2.4 末2碼→西元
         prof["year"] = _y if _y is not None else 1990
         profiles.append(prof)
-    return profiles, {"blank": blanks_by_row, "invalid": invalids}
+    return profiles, {"blank": blanks_by_row, "invalid": invalids, "blank_counts": blank_counts}
 
 
 class CanvasProgressBar(tk.Canvas):
@@ -1385,13 +1481,24 @@ class HivaWorker:
         self.dly.page()
 
         # === Page 7 — 篩檢習慣 + 聯絡方式（v1.0.32：用實際 name + value） ===
+        # v1.3.1：hiva 改版後三個選項都掛 __doPostBack（UpdatePanel 局部重載），
+        #         點完必須等重載結束再動作；選「是」會多出「最近篩檢年月」伺服器端必填欄位
+        th_map = {"是": "1", "否": "2", "從未做過": "0"}
         if is_complete:
-            # testing_habit (rdlRegularScreening): 1=是 / 2=否 / 0=從未做過
-            th_map = {"是": "1", "否": "2", "從未做過": "0"}
             tval = th_map.get(profile.get("testing_habit", "否"), "2")
-            if not self._set_radio_by_name("ctl00$MainContent$QuestWizard$rdlRegularScreening", tval):
-                # fallback：原 fill_groups
-                self._fill_groups_in_order(profile, [PAGE7_BASE_KEY])
+        else:
+            tval = "0" if profile.get("testing", "否") == "從未做過" else "2"
+        if not self._set_p7_habit(tval):
+            save_debug_snapshot(d, "p7_habit_fail"); return None
+        if tval == "1":
+            ym = _normalize_ym(profile.get("last_screen_ym")) or ""
+            if not ym:
+                ym = _random_recent_ym()
+                self.log(f"  🎲 最近篩檢年月空白 → 隨機填 {ym}")
+            if not self._set_input_value_js("ctl00$MainContent$QuestWizard$LastTimeScreening", ym):
+                save_debug_snapshot(d, "p7_last_ym_fail"); return None
+            profile["last_screen_ym"] = ym   # 回寫，讓 Excel 記錄實際送出的值
+        if is_complete:
             # text 欄位用 name 精確定位（v1.0.32 修正：之前 label 鄰近搜尋抓不到）
             for key, name in [("phone",         "ctl00$MainContent$QuestWizard$txtMobile"),
                                ("email",         "ctl00$MainContent$QuestWizard$txtEMail"),
@@ -1399,23 +1506,32 @@ class HivaWorker:
                 v = profile.get(key, "")
                 if v:
                     self._fill_text_input_by_name(name, v)
-        else:
-            choice = profile.get("testing", "否")
-            if choice == "從未做過":
-                self._click_label_text("從未做過")
-            else:
-                self._click_label_text("否")
         self.dly.action()
         if not self._click_done():
             return None
         self.dly.page()
 
         # === 結果頁：抓代碼（伺服器繁忙時可能要等較久） ===
+        # v1.3.1：改認結果頁網址或 body 可見文字「諮詢代碼為」；
+        #         舊法 presence_of //*[contains(text(),'諮詢代碼')] 會被第七頁隱藏 <script> 文字誤中
+        def _at_result(drv):
+            try:
+                if "HAANeedScreeningMessage" in (drv.current_url or ""):
+                    return True
+                return "諮詢代碼為" in drv.find_element(By.TAG_NAME, "body").text
+            except Exception:
+                return False
         try:
-            WebDriverWait(d, self.dly.wait_timeout * 2).until(EC.presence_of_element_located(
-                (By.XPATH, "//*[contains(text(),'諮詢代碼')]")))
+            WebDriverWait(d, self.dly.wait_timeout * 2).until(_at_result)
         except Exception:
-            self.log("⚠ 沒等到結果頁")
+            try:
+                bt = d.find_element(By.TAG_NAME, "body").text
+            except Exception:
+                bt = ""
+            if "反紅處" in bt or "Not valid" in bt:
+                self.log("✗ 伺服器擋下：第七頁必填未通過（篩檢習慣=是 需填最近篩檢年月），仍停在第七頁")
+            else:
+                self.log(f"⚠ 沒等到結果頁（目前網址 {d.current_url}）")
             save_debug_snapshot(d, "result_page_timeout")
             return None
         # v1.0.12：DEBUG 模式存前 2 筆成功的結果頁，方便驗證代碼讀對位置
@@ -1803,6 +1919,91 @@ class HivaWorker:
             self.log(f"✗ radio name={name_attr} value={value} 點選失敗：{e}")
             return False
 
+    # ── v1.3.1 第七頁：篩檢習慣 radio 掛 __doPostBack（UpdatePanel 局部更新） ──
+    _P7_HABIT_NAME = "ctl00$MainContent$QuestWizard$rdlRegularScreening"
+    _P7_LAST_YM_NAME = "ctl00$MainContent$QuestWizard$LastTimeScreening"
+
+    def _set_p7_habit(self, value, retries=1):
+        """點篩檢習慣 radio → 等 ASP.NET 非同步 PostBack 真正開始並結束（或整頁重載完成）
+           → 重新定位確認勾選狀態（UpdatePanel 會換掉舊元素，不能沿用 WebElement）。
+           value: 1=是 / 2=否 / 0=從未做過"""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        d = self.driver
+        hook_js = (
+            "try{var m=Sys.WebForms.PageRequestManager.getInstance();"
+            "window.__hivPB={started:0,done:0};"
+            "m.add_beginRequest(function(){window.__hivPB.started++;});"
+            "m.add_endRequest(function(){window.__hivPB.done++;});return true;}"
+            "catch(e){return false;}")
+        poll_js = (
+            "var p=window.__hivPB; if(!p){return 'reloaded';}"
+            "if(p.done>0){return 'done';} if(p.started>0){return 'busy';} return 'idle';")
+        for attempt in range(retries + 1):
+            hooked = False
+            try:
+                hooked = bool(d.execute_script(hook_js))
+            except Exception:
+                hooked = False
+            if not self._set_radio_by_name(self._P7_HABIT_NAME, value):
+                return False
+            if hooked:
+                # 先等 postback 開始（setTimeout 0 觸發）再等結束；整頁重載時 window.__hivPB 會消失
+                deadline = time.time() + self.dly.wait_timeout
+                state = "idle"
+                while time.time() < deadline:
+                    try:
+                        state = d.execute_script(poll_js)
+                    except Exception:
+                        state = "reloaded"
+                    if state in ("done", "reloaded"):
+                        break
+                    time.sleep(0.15)
+                if state == "reloaded":
+                    try:
+                        WebDriverWait(d, self.dly.wait_timeout).until(
+                            lambda drv: drv.execute_script("return document.readyState") == "complete")
+                    except Exception:
+                        pass
+                elif state != "done":
+                    self.log("  ⚠ 篩檢習慣 postback 未回應，改用固定等待")
+                    time.sleep(1.0)
+            else:
+                time.sleep(1.2)   # 沒有 PageRequestManager（網站又改版？）→ 固定等待
+            # 重新定位驗證勾選狀態
+            try:
+                el = d.find_element(By.XPATH,
+                    f"//input[@type='radio' and @name=\"{self._P7_HABIT_NAME}\" and @value=\"{value}\"]")
+                if el.is_selected():
+                    if value == "1":
+                        WebDriverWait(d, self.dly.wait_timeout).until(
+                            lambda drv: drv.find_elements(By.NAME, self._P7_LAST_YM_NAME))
+                    return True
+            except Exception as e:
+                self.log(f"  ⚠ 篩檢習慣重新定位失敗：{e}")
+            if attempt < retries:
+                self.log("  ↻ 篩檢習慣勾選未生效，重試一次")
+        self.log("✗ 篩檢習慣 radio 勾選未生效")
+        return False
+
+    def _set_input_value_js(self, name, value):
+        """v1.3.1：用 JS 直接設 input value（LastTimeScreening 的 onclick 會彈月曆，避免 click/send_keys）"""
+        from selenium.webdriver.common.by import By
+        d = self.driver
+        try:
+            el = d.find_element(By.NAME, name)
+            d.execute_script(
+                "arguments[0].value=arguments[1];"
+                "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));", el, str(value))
+            got = el.get_attribute("value")
+            if got != str(value):
+                self.log(f"  ⚠ input name={name} 設值後讀回「{got}」≠「{value}」")
+                return False
+            return True
+        except Exception as e:
+            self.log(f"  ⚠ 找不到 input name={name}：{e}")
+            return False
+
     def _wait_for_enabled(self, elem_id, timeout=None):
         """等到指定元素的 disabled 屬性消失（ASP.NET PostBack 完成的錨點）"""
         from selenium.webdriver.common.by import By
@@ -1970,15 +2171,16 @@ class App:
         ttk.Label(self._batch_xlsx_tools, textvariable=self.import_status_var,
                   foreground="#1565c0", font=("微軟正黑體", 9, "bold")).pack(side="left", padx=12)
         # v1.2.2 空格依簡易比例隨機補齊（只填性別/出生年、其餘留空即可）
-        ttk.Checkbutton(self._batch_xlsx_tools, text="🎲 空格依簡易比例隨機補齊（風險題維持否）",
-                        variable=self.fill_blank_random_var).pack(side="left", padx=8)
+        ttk.Checkbutton(self._batch_xlsx_tools, text="🧩 空格依下方設定補齊（風險題維持否）",
+                        variable=self.fill_blank_random_var,
+                        command=lambda: self._apply_card_visibility()).pack(side="left", padx=8)
         # 簡易為 default → 啟動時不 pack（_on_mode_change 切換時才顯示）
 
         # ── 批次取號分頁內容 ──
         # v1.0.23：完整模式專用預覽列表（簡易模式時隱藏）
         preview_fr = ttk.LabelFrame(tab_batch, text="📋 已匯入預覽（顯示主要欄位）")
-        cols = ("#", "性別", "出生年", "18歲前", "現居", "性傾向", "教育", "Q1性行為", "Q6性病", "Q7藥物", "P7篩檢")
-        widths = (40, 60, 70, 90, 90, 70, 100, 70, 60, 60, 80)
+        cols = ("#", "性別", "出生年", "18歲前", "現居", "性傾向", "教育", "Q1性行為", "Q6性病", "Q7藥物", "P7篩檢", "篩檢年月")
+        widths = (40, 60, 70, 90, 90, 70, 100, 70, 60, 60, 80, 80)
         self.preview_tree = ttk.Treeview(preview_fr, columns=cols, show="headings", height=8)
         for c, w in zip(cols, widths):
             self.preview_tree.heading(c, text=c)
@@ -2108,22 +2310,24 @@ class App:
         # v1.0.49：每維度自己的色階（Claude Design exe_concept.html 3.3）
         self.gender_pcts  = self._make_pct_block("性別分布", GENDERS, [100, 0, 0, 0],
                                                   palette=["#5b8def", "#a4c0f0", "#dde5f4", "#eef1f5"],
-                                                  parent=col_left)
+                                                  parent=col_left, key="gender")
         self.nation_pcts  = self._make_pct_block("國籍分布", NATIONS, [100, 0],
                                                   palette=["#5fa787", "#9bc8b3"],
-                                                  parent=col_left)
+                                                  parent=col_left, key="nation")
         self.edu_pcts     = self._make_pct_block("教育程度分布", EDUS, [0, 33, 34, 33, 0],
                                                   palette=["#6c5ce7", "#a092ee", "#cbc4f4", "#e3dff8", "#eef1f5"],
-                                                  parent=col_left)
+                                                  parent=col_left, key="edu")
         # 右欄：性傾向 / 篩檢習慣 / 18 歲前居住地 / 現居住地
         self.orient_pcts  = self._make_pct_block("性傾向分布", ORIENTS, [0, 0, 100],
                                                   palette=["#d97a8a", "#e9a5b1", "#f3cbd2"],
-                                                  parent=col_right)
+                                                  parent=col_right, key="orient")
         self.testing_pcts = self._make_pct_block("篩檢習慣分布（Q1）", TESTING, [50, 50],
                                                   palette=["#c39145", "#dcb888"],
-                                                  parent=col_right)
-        self.res18_rows   = self._make_city_block("18 歲以前居住地分布",                          parent=col_right)
-        self.resCur_rows  = self._make_city_block("現居住地分布",                                  parent=col_right)
+                                                  parent=col_right, key="testing_habit")
+        self.res18_rows   = self._make_city_block("18 歲以前居住地分布", parent=col_right, key="res18")
+        self.resCur_rows  = self._make_city_block("現居住地分布",         parent=col_right, key="resCur")
+        # v1.3.1 完整模式「空格補齊面板」（匯入後顯示缺格統計，只露出有缺格欄位的卡片）
+        self._build_blank_panel(tab_batch)
 
         # ── v1.0.19 單筆取號分頁內容 ──
         self._build_single_tab(tab_single)
@@ -2236,11 +2440,34 @@ class App:
                   foreground="#9e9e9e",
                   font=("微軟正黑體", 9)).pack(side="right")
 
-    def _make_pct_block(self, title, options, defaults, parent=None, palette=None):
+    # ── v1.3.1 每張比例卡片的「🎲 隨機／📶 依序」切換（key → StringVar "random"/"seq"） ──
+    def _make_order_chips(self, header, key):
+        """在卡片 header 放兩顆 radio chip；依序＝先把第一個選項的筆數填滿再換下一個"""
+        if not hasattr(self, "seq_mode_vars"):
+            self.seq_mode_vars = {}
+        var = self.seq_mode_vars.get(key)
+        if var is None:
+            var = tk.StringVar(value="random")
+            self.seq_mode_vars[key] = var
+        fr = ttk.Frame(header)
+        fr.pack(side="right", padx=(0, 8))
+        ttk.Radiobutton(fr, text="🎲 隨機", variable=var, value="random").pack(side="left")
+        ttk.Radiobutton(fr, text="📶 依序", variable=var, value="seq").pack(side="left", padx=(4, 0))
+        return var
+
+    def _register_demo_card(self, key, card, parent):
+        """v1.3.1 記錄卡片（完整模式只顯示有缺格的欄位卡片，需個別 pack/pack_forget）"""
+        if not hasattr(self, "_demo_cards"):
+            self._demo_cards = []   # [(key, card, parent)] 依建立順序
+        if key:
+            self._demo_cards.append((key, card, parent))
+
+    def _make_pct_block(self, title, options, defaults, parent=None, palette=None, key=None):
         """v1.0.49 dashboard 卡片版（取代 v1.0.x LabelFrame）：
         頂部 title + 「∑ N%」狀態 → 水平堆疊比例條 → legend 列（色點 + 標籤 + entry + 筆數）
         參考 Claude Design 概念稿 exe_concept.html 3.3 人物輪廓卡。
-        palette 是該維度專屬色階（從主到淡），不夠長會重複用最後一格。"""
+        palette 是該維度專屬色階（從主到淡），不夠長會重複用最後一格。
+        v1.3.1：key 給「隨機／依序」切換與完整模式缺格顯示用。"""
         if not palette:
             palette = ["#5b8def", "#a4c0f0", "#dde5f4", "#e3e8ef", "#eef1f5"]
         # 不夠長補淡灰
@@ -2250,6 +2477,7 @@ class App:
         # 卡容器
         card = ttk.Frame(parent or self.root, padding=(12, 8))
         card.pack(fill="x", padx=6, pady=4)
+        self._register_demo_card(key, card, parent or self.root)
 
         # Header：標題 + 總和狀態（滿 100% 時灰，否則橘色提示）
         header = ttk.Frame(card)
@@ -2258,6 +2486,8 @@ class App:
         sum_var = tk.StringVar(value="")
         sum_lbl = ttk.Label(header, textvariable=sum_var, font=("Consolas", 9))
         sum_lbl.pack(side="right")
+        if key:
+            self._make_order_chips(header, key)
 
         # 水平堆疊比例條
         bar = tk.Canvas(card, height=8, bg="#eef1f5", highlightthickness=0, bd=0)
@@ -2324,7 +2554,7 @@ class App:
         mode_fr.pack(fill="x", padx=6, pady=(8, 4))
         ttk.Radiobutton(mode_fr, text="📊 簡易（8 個基本欄位）", variable=self.single_mode_var,
                         value="簡易", command=self._on_single_mode_change).pack(side="left", padx=10, pady=6)
-        ttk.Radiobutton(mode_fr, text="📋 完整（全部 48 欄精準設定）", variable=self.single_mode_var,
+        ttk.Radiobutton(mode_fr, text="📋 完整（全部 49 欄精準設定）", variable=self.single_mode_var,
                         value="完整", command=self._on_single_mode_change).pack(side="left", padx=10, pady=6)
         # v1.0.26：移除上方獨立按鈕；單筆 / 批次 都用底部「▶ 開始取號」（會依當前分頁切換）
         self.single_result_var = tk.StringVar(value="尚未取號")
@@ -2390,7 +2620,7 @@ class App:
   ‧ 適合大部分外展協助情境
 
 完整模式：
-  ‧ 切到右上「完整」可精準設定全部 48 欄
+  ‧ 切到右上「完整」可精準設定全部 49 欄
   ‧ 適合需要 Q6=是 / Q7=是 / PrEP-PEP 等特殊條件
 """, justify="left", padding=(10, 10), foreground="#37474f").pack(anchor="w", padx=8, pady=8)
 
@@ -2468,6 +2698,10 @@ class App:
         # P7
         p7 = ttk.Frame(sub_nb); sub_nb.add(p7, text="P7 篩檢習慣 + 聯絡")
         mk_radio_row(p7, "Q1 篩檢習慣", "testing_habit", ["是", "否", "從未做過"], "否")
+        # v1.3.1 hiva 新題：篩檢習慣=是 時必填
+        mk_text_row (p7, "Q2 最近篩檢年月", "last_screen_ym")
+        ttk.Label(p7, text="　　（篩檢習慣＝是 才需要；格式 2026/3；空白＝隨機最近 1~12 個月）",
+                  foreground="#7d8696", font=("微軟正黑體", 9)).pack(anchor="w", padx=6)
         mk_text_row (p7, "手機號碼（選填）", "phone")
         mk_text_row (p7, "E-mail（選填）",   "email")
         mk_text_row (p7, "其它聯絡（選填）", "other_contact")
@@ -2486,7 +2720,7 @@ class App:
             except Exception: pass
             self.single_simple_fr.pack(fill="both", expand=True)
 
-    def _make_city_block(self, title, parent=None):
+    def _make_city_block(self, title, parent=None, key=None):
         """v1.0.51 dashboard 卡片版（與 _make_pct_block 同節奏）：
         Header（標題 + 添加按鈕）→ 水平堆疊比例條 → 動態列（●+Combobox+%+✕）
         城市色階：青色系（Claude Design 概念稿 居住地 #0fa3a3 / #5cc4c4 / #a8dede）
@@ -2495,6 +2729,7 @@ class App:
 
         card = ttk.Frame(parent or self.root, padding=(12, 8))
         card.pack(fill="x", padx=6, pady=4)
+        self._register_demo_card(key, card, parent or self.root)
 
         # Header
         header = ttk.Frame(card)
@@ -2502,6 +2737,8 @@ class App:
         ttk.Label(header, text=title, font=("微軟正黑體", 11, "bold")).pack(side="left")
         sum_var = tk.StringVar(value="")
         ttk.Label(header, textvariable=sum_var, font=("Consolas", 9)).pack(side="right", padx=(0, 6))
+        if key:
+            self._make_order_chips(header, key)
 
         # 水平堆疊比例條
         bar = tk.Canvas(card, height=8, bg="#eef1f5", highlightthickness=0, bd=0)
@@ -2598,16 +2835,28 @@ class App:
             wait_timeout=self.dly_timeout.get(),
         )
 
+    def _in_complete_fill(self):
+        """v1.3.1：完整模式且已匯入 → 卡片筆數/顯示改依各欄空格數"""
+        try:
+            return self.mode_var.get() == "完整（匯入xlsx）" and bool(self._imported_profiles)
+        except Exception:
+            return False
+
     def _update_counts(self, *_):
         try:
             tot = self.total_var.get()
         except Exception:
             tot = 0
-        for block in (self.gender_pcts, self.nation_pcts, self.edu_pcts, self.orient_pcts, self.testing_pcts):
+        complete = self._in_complete_fill()
+        bc = getattr(self, "_blank_counts", {}) or {}
+        for key, block in (("gender", self.gender_pcts), ("nation", self.nation_pcts),
+                           ("edu", self.edu_pcts), ("orient", self.orient_pcts),
+                           ("testing_habit", self.testing_pcts)):
+            n = bc.get(key, 0) if complete else tot
             for op, v, cnt in block:
                 try: pv = v.get()
                 except Exception: pv = 0
-                cnt.set(f"{int(round(tot * pv / 100))} 筆")
+                cnt.set(f"{int(round(n * pv / 100))} 筆")
 
     def log(self, msg):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
@@ -2860,42 +3109,21 @@ class App:
         return True
 
     def _build_profile_pool(self):
-        """依比例展開成 N 筆 profile 列表（並隨機打亂）"""
-        n = self.total_var.get()
-
-        def expand(block):
-            opts, ws = [], []
-            for op, v, _ in block:
-                opts.append(op); ws.append(v.get())
-            return opts, ws
-
-        def expand_city(rows):
-            opts, ws = [], []
-            for cv, pv, _ in rows:
-                opts.append(cv.get()); ws.append(pv.get())
-            return opts, ws
-
-        g_opts, g_ws = expand(self.gender_pcts)
-        n_opts, n_ws = expand(self.nation_pcts)
-        e_opts, e_ws = expand(self.edu_pcts)
-        o_opts, o_ws = expand(self.orient_pcts)
-        t_opts, t_ws = expand(self.testing_pcts)
-        r18_opts, r18_ws = expand_city(self.res18_rows)
-        rC_opts, rC_ws  = expand_city(self.resCur_rows)
-
-        ylo, yhi = sorted([self.year_lo.get(), self.year_hi.get()])
-
+        """依比例展開成 N 筆 profile 列表。
+           v1.3.1：每個維度依卡片「🎲 隨機／📶 依序」各自產值（依序＝先填滿第一項再換下一項）"""
+        n = max(0, int(self.total_var.get()))
+        cols = {k: self._demo_values(k, n) for k in DEMO_FILL_KEYS}
         pool = []
-        for _ in range(n):
+        for i in range(n):
             pool.append({
-                "gender": weighted_pick(g_opts, g_ws),
-                "nation": weighted_pick(n_opts, n_ws),
-                "year":   random.randint(ylo, yhi),
-                "res18":  weighted_pick(r18_opts, r18_ws),
-                "resCur": weighted_pick(rC_opts, rC_ws),
-                "orient": weighted_pick(o_opts, o_ws),
-                "edu":    weighted_pick(e_opts, e_ws),
-                "testing": weighted_pick(t_opts, t_ws),
+                "gender": cols["gender"][i],
+                "nation": cols["nation"][i],
+                "year":   cols["year"][i],
+                "res18":  cols["res18"][i],
+                "resCur": cols["resCur"][i],
+                "orient": cols["orient"][i],
+                "edu":    cols["edu"][i],
+                "testing": cols["testing_habit"][i],
             })
         return pool
 
@@ -3284,16 +3512,98 @@ class App:
                 self._batch_xlsx_tools.pack(side="left", padx=4)  # v1.0.44
                 self._batch_topbar.pack_forget()
                 self._batch_midbar.pack_forget()
+                self._blank_panel.pack_forget()
                 self._batch_preview_fr.pack(fill="x", padx=6, pady=4)
+                # v1.3.1：預覽 → 缺格面板 → 只含缺格欄位卡片的 midbar（pack 順序即畫面順序）
+                self._blank_panel.pack(fill="x", padx=6, pady=(0, 4))
+                self._batch_midbar.pack(fill="x", padx=6, pady=4)
                 self.log("📋 切換到完整模式（請匯入 xlsx）")
             else:
                 self._batch_xlsx_tools.pack_forget()  # v1.0.44
                 self._batch_preview_fr.pack_forget()
+                self._blank_panel.pack_forget()
+                self._batch_midbar.pack_forget()
                 self._batch_topbar.pack(fill="x", padx=6, pady=4)
                 self._batch_midbar.pack(fill="x", padx=6, pady=4)
                 self.log("📊 切換到簡易模式")
+            self._apply_card_visibility()
+            self._update_counts()
         except Exception as e:
             self.log(f"⚠ 模式切換異常：{e}")
+
+    # ── v1.3.1 完整模式「空格補齊面板」 ──
+    def _build_blank_panel(self, parent):
+        """匯入後顯示：各欄缺格筆數摘要 + 出生年區間（缺出生年時）+ 最近篩檢年月缺筆提示。
+           面板本身不放卡片；卡片留在 midbar，由 _apply_card_visibility 決定露出哪幾張。"""
+        self._blank_counts = {}
+        panel = ttk.LabelFrame(parent, text="🧩 空格補齊設定（只顯示有缺格的欄位；每張卡片可選 🎲 隨機／📶 依序）")
+        self._blank_panel = panel
+        self._blank_summary_fr = ttk.Frame(panel)
+        self._blank_summary_fr.pack(fill="x", padx=8, pady=(6, 2))
+        # 出生年區間列（缺出生年時才顯示；Entry 與簡易模式共用同一個 IntVar）
+        self._blank_year_fr = ttk.Frame(panel)
+        ttk.Label(self._blank_year_fr, text="● 出生年缺格 → 於", font=("微軟正黑體", 10)).pack(side="left")
+        self._mk_int_entry(self._blank_year_fr, self.year_lo, width=6, justify="center").pack(side="left", padx=2)
+        ttk.Label(self._blank_year_fr, text="~").pack(side="left")
+        self._mk_int_entry(self._blank_year_fr, self.year_hi, width=6, justify="center").pack(side="left", padx=2)
+        ttk.Label(self._blank_year_fr, text="區間隨機（西元）", font=("微軟正黑體", 10)).pack(side="left")
+        # 最近篩檢年月列
+        self._blank_ym_var = tk.StringVar(value="")
+        self._blank_ym_lbl = ttk.Label(panel, textvariable=self._blank_ym_var,
+                                       font=("微軟正黑體", 10), foreground="#c39145")
+        self._render_blank_summary()
+
+    def _render_blank_summary(self):
+        """重畫缺格摘要列：缺格>0 藍字粗體、0 灰字；控制出生年列／年月列顯示"""
+        fr = self._blank_summary_fr
+        for w in fr.winfo_children():
+            w.destroy()
+        bc = self._blank_counts or {}
+        if not self._imported_profiles:
+            ttk.Label(fr, text="（匯入 xlsx 後，這裡會列出每個欄位缺幾格，並只顯示缺格欄位的比例設定）",
+                      foreground="#7d8696", font=("微軟正黑體", 10)).pack(side="left")
+            self._blank_year_fr.pack_forget(); self._blank_ym_lbl.pack_forget()
+            return
+        ttk.Label(fr, text="缺格統計：", font=("微軟正黑體", 10, "bold")).pack(side="left")
+        for k in DEMO_FILL_KEYS:
+            n = bc.get(k, 0)
+            lab = OUTPUT_LABELS.get(k, k)
+            ttk.Label(fr, text=f"{lab} {n}",
+                      foreground="#1565c0" if n else "#9e9e9e",
+                      font=("微軟正黑體", 10, "bold" if n else "normal")).pack(side="left", padx=(0, 2))
+            ttk.Label(fr, text="／", foreground="#c5c5c5").pack(side="left")
+        ym_n = bc.get("last_screen_ym", 0)
+        ttk.Label(fr, text=f"最近篩檢年月(是) {ym_n}",
+                  foreground="#c39145" if ym_n else "#9e9e9e",
+                  font=("微軟正黑體", 10, "bold" if ym_n else "normal")).pack(side="left")
+        total_blank = sum(bc.get(k, 0) for k in DEMO_FILL_KEYS)
+        if total_blank == 0 and ym_n == 0:
+            ttk.Label(fr, text="　✓ 全部填齊，不需補齊", foreground="#2e7d32",
+                      font=("微軟正黑體", 10, "bold")).pack(side="left", padx=8)
+        if bc.get("year", 0):
+            self._blank_year_fr.pack(fill="x", padx=8, pady=2)
+        else:
+            self._blank_year_fr.pack_forget()
+        if ym_n:
+            self._blank_ym_var.set(f"● 篩檢習慣＝是 但最近篩檢年月空白 {ym_n} 筆 → 執行時隨機填最近 1~12 個月（格式 2026/3）")
+            self._blank_ym_lbl.pack(fill="x", padx=8, pady=(2, 6))
+        else:
+            self._blank_ym_lbl.pack_forget()
+
+    def _apply_card_visibility(self):
+        """簡易模式：全部卡片顯示；完整模式：只顯示有缺格的欄位卡片（同一父容器 pack/pack_forget，保持原順序）"""
+        cards = getattr(self, "_demo_cards", [])
+        complete = self._in_complete_fill()
+        bc = self._blank_counts or {}
+        for key, card, parent in cards:
+            card.pack_forget()
+        for key, card, parent in cards:
+            if self.mode_var.get() == "完整（匯入xlsx）":
+                show = complete and bc.get(key, 0) > 0 and self.fill_blank_random_var.get()
+            else:
+                show = True
+            if show:
+                card.pack(fill="x", padx=6, pady=4)
 
     def _export_sample_xlsx(self):
         ensure_outdir()
@@ -3334,11 +3644,21 @@ class App:
                     return
             # 通過驗證或使用者選擇繼續
             self._imported_profiles = profiles
+            self._blank_counts = (warn.get("blank_counts", {}) if isinstance(warn, dict) else {}) or {}
             self.import_status_var.set(f"✓ 已匯入 {len(profiles)} 筆")
             self.log(f"📥 已匯入 {len(profiles)} 筆 → {os.path.basename(fp)}")
+            # v1.3.1 缺格統計一行摘要
+            bc = self._blank_counts
+            parts = [f"{OUTPUT_LABELS.get(k, k)} {bc.get(k, 0)}" for k in DEMO_FILL_KEYS if bc.get(k, 0)]
+            if bc.get("last_screen_ym", 0):
+                parts.append(f"最近篩檢年月(是) {bc['last_screen_ym']}")
+            if parts:
+                self.log("  🧩 缺格統計：" + "／".join(parts) + "（見下方「空格補齊設定」）")
+            else:
+                self.log("  ✓ 8 個基本欄位全部填齊")
             if will_random and blanks:
-                self.log(f"  🎲 {len(blanks)} 列有空格 → 執行時依簡易比例隨機補齊"
-                         f"（你填的性別/出生年保留；風險題維持「否」）")
+                self.log(f"  🎲 {len(blanks)} 列有空格 → 執行時依下方各欄卡片設定補齊"
+                         f"（你填的值保留；風險題維持「否」）")
             else:
                 for ridx, fields in blanks[:5]:
                     self.log(f"  ⚠ 列 {ridx} 未填：{', '.join(fields[:6])}{'...' if len(fields)>6 else ''}（已用預設值）")
@@ -3350,6 +3670,10 @@ class App:
                 self.mode_var.set("完整（匯入xlsx）")
                 self._on_mode_change()
             self._refresh_preview_tree()
+            # v1.3.1 缺格面板 + 只露出有缺格欄位的卡片 + 卡片筆數改依缺格數
+            self._render_blank_summary()
+            self._apply_card_visibility()
+            self._update_counts()
         except Exception as e:
             messagebox.showerror("匯入失敗", str(e))
 
@@ -3438,6 +3762,7 @@ class App:
                 p.get("orient", ""), p.get("edu", ""),
                 p.get("q1_sex", ""), p.get("q6_std", ""),
                 p.get("q7_drug_use", ""), p.get("testing_habit", ""),
+                p.get("last_screen_ym", ""),
             ))
 
     # ── v1.0.21 取號中設定鎖定 ──
@@ -3531,8 +3856,10 @@ class App:
         def do_resume():
             modal.destroy()
             self._imported_profiles = pool[done:]  # 剩餘
+            self._blank_counts = {}   # v1.3.1 續傳池已補齊，沒有缺格
             self.mode_var.set("完整（匯入xlsx）")
             self._on_mode_change()
+            self._render_blank_summary()
             self.import_status_var.set(f"✓ 續傳剩 {remaining} 筆")
             self.log(f"🔄 續傳：將從第 {done+1} 筆開始（剩 {remaining} 筆）")
             try:
@@ -3702,31 +4029,48 @@ class App:
         except Exception: pass
 
     # v1.2.2 完整模式「空格隨機補齊」會動到的 8 個基本欄位
-    _DEMO_FILL_KEYS = ("gender", "nation", "year", "res18", "resCur", "orient", "edu", "testing_habit")
+    _DEMO_FILL_KEYS = DEMO_FILL_KEYS
 
-    def _random_demographics(self):
-        """v1.2.2：依簡易模式比例隨機產生 8 個基本欄位（給完整模式空格補齊用）"""
-        def expand(block):
-            opts, ws = [], []
-            for op, v, _ in block:
-                opts.append(op); ws.append(v.get())
-            return opts, ws
-        def expand_city(rows):
+    def _demo_options(self, key):
+        """v1.3.1：卡片 key → (選項列表, 權重列表)；year 回 None（用區間隨機）"""
+        if key == "year":
+            return None
+        if key in ("res18", "resCur"):
+            rows = self.res18_rows if key == "res18" else self.resCur_rows
             opts, ws = [], []
             for cv, pv, _ in rows:
-                opts.append(cv.get()); ws.append(pv.get())
+                opts.append(cv.get())
+                try: ws.append(pv.get())
+                except Exception: ws.append(0)
             return opts, ws
-        ylo, yhi = sorted([self.year_lo.get(), self.year_hi.get()])
-        return {
-            "gender":  weighted_pick(*expand(self.gender_pcts)),
-            "nation":  weighted_pick(*expand(self.nation_pcts)),
-            "year":    random.randint(ylo, yhi),
-            "res18":   weighted_pick(*expand_city(self.res18_rows)),
-            "resCur":  weighted_pick(*expand_city(self.resCur_rows)),
-            "orient":  weighted_pick(*expand(self.orient_pcts)),
-            "edu":     weighted_pick(*expand(self.edu_pcts)),
-            "testing_habit": weighted_pick(*expand(self.testing_pcts)),
-        }
+        block = {"gender": self.gender_pcts, "nation": self.nation_pcts, "edu": self.edu_pcts,
+                 "orient": self.orient_pcts, "testing_habit": self.testing_pcts}[key]
+        opts, ws = [], []
+        for op, v, _ in block:
+            opts.append(op)
+            try: ws.append(v.get())
+            except Exception: ws.append(0)
+        return opts, ws
+
+    def _demo_values(self, key, total):
+        """v1.3.1：依該卡片「🎲 隨機／📶 依序」產 total 個值。
+           隨機＝逐筆 weighted_pick；依序＝allocate_sequence（先填滿第一個選項再換下一個）。
+           簡易模式與完整模式空格補齊共用這一個入口。"""
+        total = max(0, int(total))
+        if key == "year":
+            ylo, yhi = sorted([self.year_lo.get(), self.year_hi.get()])
+            return [random.randint(ylo, yhi) for _ in range(total)]
+        opts, ws = self._demo_options(key)
+        if not opts:
+            return [None] * total
+        mode = "random"
+        try:
+            mode = self.seq_mode_vars[key].get()
+        except Exception:
+            pass
+        if mode == "seq":
+            return allocate_sequence(opts, ws, total)
+        return [weighted_pick(opts, ws) for _ in range(total)]
 
     def _build_pool_for_mode(self):
         """v1.0.21：依當前模式產 pool"""
@@ -3734,19 +4078,23 @@ class App:
             if not self._imported_profiles:
                 messagebox.showerror("無資料", "完整模式請先匯入 xlsx")
                 return None
-            # v1.2.2：複製一份；若開「空格隨機補齊」，把每筆的空欄（限 8 基本欄位）
-            #         以簡易模式比例隨機填入（使用者已填的值保留；風險題維持預設「否」）
+            # v1.2.2/v1.3.1：複製一份；若開「空格依下方設定補齊」，把每欄的空格
+            #   依該欄卡片（比例＋隨機/依序）產值填入（使用者已填的值保留；風險題維持預設「否」）
             fill_random = self.fill_blank_random_var.get()
-            pool = []
-            for p in self._imported_profiles:
-                q = dict(p)
-                blanks = set(q.pop("_blanks", []))
-                if fill_random and blanks:
-                    rd = self._random_demographics()
-                    for kk in self._DEMO_FILL_KEYS:
-                        if kk in blanks:
-                            q[kk] = rd[kk]
-                pool.append(q)
+            pool = [dict(p) for p in self._imported_profiles]
+            blanks_per = [set(q.pop("_blanks", [])) for q in pool]
+            if fill_random:
+                for kk in DEMO_FILL_KEYS:
+                    idxs = [i for i, b in enumerate(blanks_per) if kk in b]
+                    if not idxs:
+                        continue
+                    vals = self._demo_values(kk, len(idxs))
+                    for i, v in zip(idxs, vals):
+                        pool[i][kk] = v
+                # 篩檢習慣=是 且年月空白 → 先在這裡補（執行端也有最後防線）
+                for i, q in enumerate(pool):
+                    if q.get("testing_habit") == "是" and not q.get("last_screen_ym"):
+                        q["last_screen_ym"] = _random_recent_ym()
             return pool
         else:
             return self._build_profile_pool()
@@ -3835,6 +4183,11 @@ class App:
                     prof[k] = dv
             try: prof["year"] = int(prof.get("year") or 1990)
             except Exception: prof["year"] = 1990
+            # v1.3.1 最近篩檢年月正規化；格式錯或空白 → 交由執行端隨機補（只在篩檢習慣=是時用到）
+            _ym = _normalize_ym(prof.get("last_screen_ym"))
+            if prof.get("last_screen_ym") and not _ym:
+                self.log(f"⚠ 最近篩檢年月「{prof['last_screen_ym']}」格式不符（例 2026/3）→ 改隨機")
+            prof["last_screen_ym"] = _ym or ""
             # 兼容舊 worker 路徑（is_complete 偵測用 q1_sex 存在）
         else:
             prof = {
@@ -3913,6 +4266,7 @@ class App:
             "res18":   [(cv.get(), pv.get()) for cv, pv, _ in self.res18_rows],
             "resCur":  [(cv.get(), pv.get()) for cv, pv, _ in self.resCur_rows],
             "fill_blank_random": self.fill_blank_random_var.get(),  # v1.2.2
+            "seq_modes": {k: v.get() for k, v in getattr(self, "seq_mode_vars", {}).items()},  # v1.3.1
         }
         return d
 
@@ -3960,6 +4314,10 @@ class App:
             if "year_lo" in d:  self.year_lo.set(d["year_lo"])
             if "year_hi" in d:  self.year_hi.set(d["year_hi"])
             if "fill_blank_random" in d:  self.fill_blank_random_var.set(bool(d["fill_blank_random"]))  # v1.2.2
+            # v1.3.1 各卡片隨機/依序
+            for k, m in (d.get("seq_modes") or {}).items():
+                if k in getattr(self, "seq_mode_vars", {}) and m in ("random", "seq"):
+                    self.seq_mode_vars[k].set(m)
             if "speed_preset" in d: self.speed_preset.set(d["speed_preset"])
             for k_ui, k_dict in [
                 ("dly_act_lo","dly_act_lo"), ("dly_act_hi","dly_act_hi"),
