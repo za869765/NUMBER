@@ -1939,15 +1939,26 @@ class HivaWorker:
         poll_js = (
             "var p=window.__hivPB; if(!p){return 'reloaded';}"
             "if(p.done>0){return 'done';} if(p.started>0){return 'busy';} return 'idle';")
+        radio_xp = f"//input[@type='radio' and @name=\"{self._P7_HABIT_NAME}\" and @value=\"{value}\"]"
         for attempt in range(retries + 1):
+            # 重試時若上一輪其實已勾選（只是欄位等待逾時），再點同一顆不會觸發 postback → 跳過點擊直接驗證
+            already = False
+            if attempt > 0:
+                try:
+                    already = d.find_element(By.XPATH, radio_xp).is_selected()
+                except Exception:
+                    already = False
             hooked = False
-            try:
-                hooked = bool(d.execute_script(hook_js))
-            except Exception:
-                hooked = False
-            if not self._set_radio_by_name(self._P7_HABIT_NAME, value):
-                return False
-            if hooked:
+            if not already:
+                try:
+                    hooked = bool(d.execute_script(hook_js))
+                except Exception:
+                    hooked = False
+                if not self._set_radio_by_name(self._P7_HABIT_NAME, value):
+                    return False
+            if already:
+                pass
+            elif hooked:
                 # 先等 postback 開始（setTimeout 0 觸發）再等結束；整頁重載時 window.__hivPB 會消失
                 deadline = time.time() + self.dly.wait_timeout
                 state = "idle"
@@ -4125,18 +4136,25 @@ class App:
 
     def start(self):
         # 驗證
-        for blk, name in [
-            (self.gender_pcts, "性別"),
-            (self.nation_pcts, "國籍"),
-            (self.edu_pcts, "教育程度"),
-            (self.orient_pcts, "性傾向"),
-            (self.testing_pcts, "篩檢習慣"),
+        # v1.3.1：完整模式只驗「有缺格且畫面上顯示中」的卡片（隱藏卡片的比例不影響執行）；
+        #         總筆數只在簡易模式檢查（完整模式筆數=匯入列數）
+        complete = self._in_complete_fill()
+        bc = (self._blank_counts or {}) if complete else {}
+        fill_on = self.fill_blank_random_var.get()
+        def _need(key):
+            return (not complete) or (fill_on and bc.get(key, 0) > 0)
+        for blk, name, key in [
+            (self.gender_pcts, "性別", "gender"),
+            (self.nation_pcts, "國籍", "nation"),
+            (self.edu_pcts, "教育程度", "edu"),
+            (self.orient_pcts, "性傾向", "orient"),
+            (self.testing_pcts, "篩檢習慣", "testing_habit"),
         ]:
-            if not self._validate_pcts(blk, name):
+            if _need(key) and not self._validate_pcts(blk, name):
                 return
-        if not self._validate_city_rows(self.res18_rows, "18歲前居住地"): return
-        if not self._validate_city_rows(self.resCur_rows, "現居住地"): return
-        if self.total_var.get() < 1:
+        if _need("res18") and not self._validate_city_rows(self.res18_rows, "18歲前居住地"): return
+        if _need("resCur") and not self._validate_city_rows(self.resCur_rows, "現居住地"): return
+        if not complete and self.total_var.get() < 1:
             messagebox.showerror("錯誤", "總筆數至少 1")
             return
 
